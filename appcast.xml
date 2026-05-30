@@ -8,7 +8,7 @@
             <sparkle:version>11</sparkle:version>
             <sparkle:shortVersionString>2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/julianjear/makesomething-mac-app/releases/download/v2.0/makesomething.dmg" length="11852050" type="application/octet-stream" sparkle:edSignature="Y9o+YBln/BXAwYeJLuGV0E7B9q9/+kuhhFlNRyekZuYLPwbTYoL7aUYhurAQFfmiSuWuCUNHKXgtzaKCyaMGCQ=="/>
+            <enclosure url="https://github.com/tryskilly/skilly/releases/download/v2.0/Skilly.dmg" length="11324782" type="application/octet-stream" sparkle:edSignature="Fmhg2uuvE1AVtNN+rAHbkd9gNCt0iKcTl4f4tFR/JUe7jQeRqGZYEwm8Y3wZhPPb9HnWWbzpufJdt+1I+iKaCw=="/>
         </item>
         <item>
             <title>1.9</title>
