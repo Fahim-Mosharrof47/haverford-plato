@@ -164,6 +164,18 @@ cargo check --workspace
 cargo test --workspace
 ```
 
+### Swift ↔ Rust Bridges — landed on `develop` (Slice 2)
+
+Each bridge `dlopen`s `libskilly_core_ffi.dylib` (built from `core/ffi`) when present and falls back to the existing Swift logic when absent — so the app keeps working with or without the Rust dylib. All wiring is additive + `// MARK: - Skilly`.
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `RustPolicyBridge.swift` | ~200 | Dynamic FFI loader for policy. `EntitlementManager.canStartTurn()` + `TrialTracker`/`UsageTracker` call Rust first, Swift fallback otherwise. |
+| `RustSkillsBridge.swift` | ~220 | Dynamic FFI loader for skill prompt composition; falls back to `SkillPromptComposer`. |
+| `RustRealtimeBridge.swift` | ~180 | Dynamic FFI loader for realtime replay/lifecycle; Swift fallback otherwise. |
+
+> ⚠ The new `leanring-buddy/*.swift` files auto-compile via the project's `PBXFileSystemSynchronizedRootGroup` (Xcode 16, objectVersion 77) — no `project.pbxproj` edits needed. Validate with an Xcode build (trial/active/capped/admin turn-start + Rust-absent fallback); agents cannot run `xcodebuild` (TCC).
+
 ### Mobile SDK Bindings (`sdk/`) — landed on `develop` (Slice 3)
 
 UniFFI-generated iOS (Swift) and Android (Kotlin) bindings over `core/mobile-sdk`, plus sample consumers and packaging scripts. The `sdk/*/generated/**` files are machine-generated — **regenerate, never hand-edit** (`scripts/generate-mobile-sdk-bindings.sh`; output is byte-reproducible from the crate).
