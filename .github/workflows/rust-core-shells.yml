@@ -1,0 +1,76 @@
+name: Rust Core And Shells
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust-core-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo check
+        run: cargo check --workspace
+
+  rust-core-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo test
+        run: cargo test --workspace
+
+  ffi-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build FFI dylib
+        run: cargo build -p skilly-core-ffi
+      - name: FFI smoke tests
+        run: cargo test -p skilly-core-ffi
+
+  shell-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package: skilly-linux-shell
+          - os: windows-latest
+            package: skilly-windows-shell
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run shell smoke flow
+        run: cargo run -p ${{ matrix.package }} -- --smoke
+
+  mobile-sdk-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate mobile SDK bindings
+        run: ./scripts/generate-mobile-sdk-bindings.sh
+      - name: Verify generated bindings are up to date
+        run: git diff --exit-code -- sdk/ios/generated sdk/android/generated
+
+  mobile-sdk-consumer-validation:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate mobile SDK consumer runtime samples
+        run: ./scripts/validate-mobile-sdk-consumers.sh
+
+  mac-release-guard:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release assets and script syntax
+        run: |
+          test -f appcast.xml
+          test -f scripts/release.sh
+          bash -n scripts/release.sh
