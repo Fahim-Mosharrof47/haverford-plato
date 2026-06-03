@@ -1,0 +1,27 @@
+[package]
+name = "skilly-core-web-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WebAssembly (wasm-bindgen) surface for selected Skilly core APIs. Browser sibling of core/mobile-sdk. See docs/architecture/web-sdk-prd.md."
+
+[lib]
+name = "skilly_core_web_sdk"
+# rlib so the pure *_impl functions + native tests build on the host;
+# cdylib is the artifact wasm-pack compiles for the browser.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+skilly-core-domain = { path = "../domain" }
+skilly-core-policy = { path = "../policy" }
+skilly-core-realtime = { path = "../realtime" }
+skilly-core-skills = { path = "../skills" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# wasm-only: the JS bindings layer. Gated to wasm32 so host
+# `cargo check/test --workspace` needs no wasm toolchain (matches the
+# windows-shell-gui exclusion pattern, but here via target-specific deps).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
