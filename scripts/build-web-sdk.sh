@@ -15,6 +15,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/sdk/web/generated"
 
+# Pin rustc to the rustup toolchain. On hosts that also have a Homebrew rust on
+# PATH, the toolchain cargo otherwise resolves `rustc` from PATH (Homebrew's,
+# which has no wasm32 std) and fails with "can't find crate for `core`".
+if command -v rustup >/dev/null 2>&1; then
+  TOOLCHAIN_BIN="$(dirname "$(rustup which rustc)")"
+  export PATH="$TOOLCHAIN_BIN:$PATH"
+  export RUSTC="$TOOLCHAIN_BIN/rustc"
+fi
+
 cd "$REPO_ROOT/core/web-sdk"
 
 wasm-pack build \

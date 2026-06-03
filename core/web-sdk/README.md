@@ -40,10 +40,14 @@ the core (and therefore to desktop/mobile).
 ## Build the browser package (wasm)
 
 ```bash
-./scripts/build-web-sdk.sh   # wasm-pack → sdk/web/generated/
+./scripts/build-web-sdk.sh   # wasm-pack → sdk/web/generated/ (gitignored build output)
 ```
 
-Requires a clean rustup toolchain with `wasm32-unknown-unknown` + `wasm-pack`.
-NOTE: a host with both Homebrew rust and rustup at the same version can fail the
-wasm32 build with "can't find crate for `core`"; prefer a single rustup
-toolchain or run in CI.
+Requires `rustup target add wasm32-unknown-unknown` + `wasm-pack`. Verified
+output: a ~195KB optimized `.wasm` + JS glue + `.d.ts` exposing `canStartTurn`,
+`trialIsExhausted`, `usageIsOverCap`, `composePrompt`, `replayRealtimeEvents`.
+
+NOTE: on a host with BOTH Homebrew rust and rustup, the toolchain `cargo`
+resolves `rustc` from PATH (Homebrew's, which lacks wasm32 std) and fails with
+"can't find crate for `core`". `scripts/build-web-sdk.sh` handles this
+automatically by pinning `RUSTC`/`PATH` to the rustup toolchain.
