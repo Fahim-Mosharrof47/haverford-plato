@@ -6,6 +6,7 @@ members = [
     "core/skills",
     "core/realtime",
     "core/mobile-sdk",
+    "core/web-sdk",
     "apps/windows-shell",
     "apps/linux-shell",
 ]

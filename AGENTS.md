@@ -201,6 +201,18 @@ Platform shell bootstrap binaries that run the shared-core turn-start flow throu
 
 > Validated on macOS: `cargo check --workspace` + `cargo run -p skilly-{windows,linux}-shell -- --smoke` both pass (turn-start `allowed=true`, `phase=completed`). The Tauri GUI builds in CI on Windows.
 
+### Web SDK WASM core (`core/web-sdk`) — Web SDK Phase 8.0
+
+Browser sibling of `core/mobile-sdk`: the shared core (`policy`, `realtime`, `skills`) exposed to JavaScript via `wasm-bindgen`. Adds `composePrompt` (not in the mobile surface) since the browser widget composes the host site's teaching prompt client-side. See `docs/architecture/web-sdk-prd.md`.
+
+| File | Purpose |
+|------|---------|
+| `core/web-sdk/src/lib.rs` | `Web*` serde mirror types + pure `*_impl` (host-testable) + `wasm-bindgen` glue gated to `target_arch = "wasm32"`. Exposes `canStartTurn`, `trialIsExhausted`, `usageIsOverCap`, `composePrompt`, `replayRealtimeEvents`. |
+| `scripts/build-web-sdk.sh` | `wasm-pack build` → `sdk/web/generated/`. |
+| `sdk/web/` | Browser SDK artifacts (sibling of `sdk/ios`, `sdk/android`). |
+
+> The `wasm-bindgen`/`serde-wasm-bindgen` deps are `wasm32`-only, so `cargo test --workspace` stays green on macOS with no wasm toolchain. Host-validated: `cargo test -p skilly-core-web-sdk` (4 tests, incl. `compose_prompt` parity vs the shared `core/skills` fixture). The actual wasm compile runs via `wasm-pack`/CI. The `@skilly/web` widget (Shadow-DOM overlay, DOM digest, selector pointing, voice) is Phase 8.1+.
+
 ### Skill Files
 
 The repo ships 5 bundled skills under `skills/`, also copied into the app bundle under `Resources/skills/` so new users get them without downloading anything.
