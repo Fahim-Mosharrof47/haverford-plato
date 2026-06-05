@@ -40,3 +40,12 @@ worker/.wrangler/
 # Rust build artifacts (e.g. browser-harness daemon run from this dir)
 target/
 **/target/
+
+# Tauri build-time generated permission/ACL schemas (per-platform, regenerated each build)
+apps/windows-shell-gui/gen/
+
+# Agent run-continuation tooling state
+.sisyphus/
+
+# wasm-pack output for core/web-sdk (regenerate via scripts/build-web-sdk.sh / CI)
+sdk/web/generated/

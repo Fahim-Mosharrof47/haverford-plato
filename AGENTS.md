@@ -140,6 +140,113 @@ Legacy secrets (unused by current pipeline): `ANTHROPIC_API_KEY`, `ASSEMBLYAI_AP
 |------|-------|---------|
 | `worker/src/index.ts` | ~900 | Worker proxy. Routes: `/openai/token` (active, authenticated, ephemeral secret mint), `/auth/url`, `/auth/callback`, `/auth/token` (active), `/checkout/create`, `/entitlement`, `/portal`, `/webhooks/polar` (Polar billing, Standard Webhooks signatures, KV-backed entitlements), `/chat`, `/tts`, `/transcribe-token` (legacy, authenticated). All API keys stored as secrets. |
 
+### Rust Core Scaffold (`core/`) — landed on `develop` (Slice 1)
+
+Shared, platform-agnostic logic compiled once and consumed by every shell (desktop via FFI, mobile via UniFFI, web via WASM). See `docs/architecture/rust-core-native-shells-prd.md` and the merge plan. Swift bridges (`Rust*Bridge.swift`), `apps/` shells, and `sdk/` mobile bindings are documented as their later slices land.
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `Cargo.toml` | ~20 | Workspace manifest. Members scoped to `core/*` on develop; `apps/*` shell crates added in Slice 4. |
+| `core/domain/src/lib.rs` | ~60 | Shared data contracts (`EntitlementState`, `PolicyInput`, `PolicyDecision`, `BlockReason`, `PolicyConfig`). |
+| `core/policy/src/lib.rs` | ~180 | Deterministic entitlement/trial/cap/admin decision engine + fixture-driven tests. |
+| `core/skills/src/lib.rs` | ~260 | Shared prompt composition (curriculum/vocabulary layers, pointing mode, vocabulary trimming) + fixture tests. NOTE: composes only — SKILL.md parsing still lives in Swift (to be ported per Web SDK plan). |
+| `core/realtime/src/lib.rs` | ~300 | Deterministic realtime turn/session state machine + replay harness. |
+| `core/ffi/src/lib.rs` | ~320 | C ABI boundary for native shells (policy, skills compose, realtime replay entrypoints). |
+| `core/mobile-sdk/src/lib.rs` | ~260 | UniFFI-exported policy/realtime API surface for generated Swift/Kotlin bindings (Slice 3). |
+| `core/{policy,skills,realtime}/fixtures/*.json` | — | Parity fixtures; `cargo test --workspace` = 13 passed. |
+| `.github/workflows/rust-core-shells.yml` | ~75 | Workspace Rust checks/tests + FFI/shell/mobile-SDK smoke jobs. |
+
+Validate the core (agent-safe — no Xcode needed):
+
+```bash
+source "$HOME/.cargo/env"
+cargo check --workspace
+cargo test --workspace
+```
+
+### Swift ↔ Rust Bridges — landed on `develop` (Slice 2)
+
+Each bridge `dlopen`s `libskilly_core_ffi.dylib` (built from `core/ffi`) when present and falls back to the existing Swift logic when absent — so the app keeps working with or without the Rust dylib. All wiring is additive + `// MARK: - Skilly`.
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `RustPolicyBridge.swift` | ~200 | Dynamic FFI loader for policy. `EntitlementManager.canStartTurn()` + `TrialTracker`/`UsageTracker` call Rust first, Swift fallback otherwise. |
+| `RustSkillsBridge.swift` | ~220 | Dynamic FFI loader for skill prompt composition; falls back to `SkillPromptComposer`. |
+| `RustRealtimeBridge.swift` | ~180 | Dynamic FFI loader for realtime replay/lifecycle; Swift fallback otherwise. |
+
+> ⚠ The new `leanring-buddy/*.swift` files auto-compile via the project's `PBXFileSystemSynchronizedRootGroup` (Xcode 16, objectVersion 77) — no `project.pbxproj` edits needed. Validate with an Xcode build (trial/active/capped/admin turn-start + Rust-absent fallback); agents cannot run `xcodebuild` (TCC).
+
+### Mobile SDK Bindings (`sdk/`) — landed on `develop` (Slice 3)
+
+UniFFI-generated iOS (Swift) and Android (Kotlin) bindings over `core/mobile-sdk`, plus sample consumers and packaging scripts. The `sdk/*/generated/**` files are machine-generated — **regenerate, never hand-edit** (`scripts/generate-mobile-sdk-bindings.sh`; output is byte-reproducible from the crate).
+
+| File | Purpose |
+|------|---------|
+| `sdk/ios/generated/*` | UniFFI Swift bindings + FFI header/modulemap for iOS consumers. |
+| `sdk/android/generated/.../skilly_core_mobile_sdk.kt` | UniFFI Kotlin bindings for Android consumers. |
+| `sdk/{ios,android}/sample/*` | Sample apps showing policy gating + realtime replay against the bindings. |
+| `scripts/generate-mobile-sdk-bindings.sh` | Builds the crate + regenerates Swift/Kotlin bindings into `sdk/`. |
+| `scripts/package-mobile-sdk.sh` / `validate-mobile-sdk-consumers.sh` | Package and end-to-end validate generated SDK consumers. |
+| `.github/workflows/mobile-sdk-artifacts.yml` | Release-triggered packaging/publishing of mobile SDK + FFI tarballs. |
+
+### Native Shells (`apps/`) — landed on `develop` (Slice 4)
+
+Platform shell bootstrap binaries that run the shared-core turn-start flow through explicit capability adapters (capture/hotkey/overlay/audio/permissions). See `docs/architecture/{adapter-contracts,phase-7-windows-shell-prd}.md`.
+
+| File | Purpose |
+|------|---------|
+| `apps/windows-shell/src/{main,lib}.rs` | Windows shell bootstrap + adapter trait surface; `--smoke` runs a turn-start through the Rust core. |
+| `apps/linux-shell/src/main.rs` | Linux shell bootstrap with session-aware capability reporting; `--smoke` flag. |
+| `apps/windows-shell-gui/*` | Windows host app (Tauri 2). **Excluded from the default cargo workspace** (`exclude` in root `Cargo.toml`) — needs Windows/CI build deps; not built by local `cargo check --workspace`. |
+
+> Validated on macOS: `cargo check --workspace` + `cargo run -p skilly-{windows,linux}-shell -- --smoke` both pass (turn-start `allowed=true`, `phase=completed`). The Tauri GUI builds in CI on Windows.
+
+### Web SDK WASM core (`core/web-sdk`) — Web SDK Phase 8.0
+
+Browser sibling of `core/mobile-sdk`: the shared core (`policy`, `realtime`, `skills`) exposed to JavaScript via `wasm-bindgen`. Adds `composePrompt` (not in the mobile surface) since the browser widget composes the host site's teaching prompt client-side. See `docs/architecture/web-sdk-prd.md`.
+
+| File | Purpose |
+|------|---------|
+| `core/web-sdk/src/lib.rs` | `Web*` serde mirror types + pure `*_impl` (host-testable) + `wasm-bindgen` glue gated to `target_arch = "wasm32"`. Exposes `canStartTurn`, `trialIsExhausted`, `usageIsOverCap`, `composePrompt`, `replayRealtimeEvents`. |
+| `scripts/build-web-sdk.sh` | `wasm-pack build` → `sdk/web/generated/`. |
+| `sdk/web/` | Browser SDK artifacts (sibling of `sdk/ios`, `sdk/android`). |
+
+> The `wasm-bindgen`/`serde-wasm-bindgen` deps are `wasm32`-only, so `cargo test --workspace` stays green on macOS with no wasm toolchain. Host-validated: `cargo test -p skilly-core-web-sdk` (4 tests, incl. `compose_prompt` parity vs the shared `core/skills` fixture). The actual wasm compile runs via `wasm-pack`/CI.
+
+### `@skilly/web` embed widget (`sdk/web`) — Web SDK Phase 8.1
+
+The embeddable companion: a **vanilla-TS + Shadow-DOM** widget (no framework — embeds must be tiny + style-isolated) that site owners drop into their web app via one `<script>`. Builds to a ~7KB IIFE (`window.Skilly`) + an ESM build via `tsup`.
+
+| File | Purpose |
+|------|---------|
+| `sdk/web/src/index.ts` | Public `Skilly` API (`init`/`start`/`on`/`identify`/`destroy`) + auto-init from `data-skilly-*` script attrs + typed event emitter. |
+| `sdk/web/src/widget.ts` | Shadow-DOM UI: launcher button, response bubble, blue cursor + `setCursorPosition` (driven per-frame by the pointing engine). |
+| `sdk/web/src/core.ts` | Lazy, tolerant loader for the `core/web-sdk` WASM (widget runs UI-only if absent). |
+| `sdk/web/src/digest.ts` | **8.2** DOM digest: structured, screenshot-free page view (interactive/annotated elements → stable ids, labels, rects) + element registry. `getPageDigest()`. |
+| `sdk/web/src/pointing.ts` | **8.2** Pointing engine: parse `[POINT:id:label]`, resolve (digest id / `data-skilly` / CSS / visible text), bezier-arc cursor flight, scroll/resize re-anchor. |
+| `sdk/web/src/token.ts` | **8.3** Backend client: fetch ephemeral Realtime token + tenant SKILL.md from `apps/web-backend`. |
+| `sdk/web/src/prompt.ts` | **8.3** Compose companion instructions: persona + SKILL.md + DOM-digest summary + `[POINT]` protocol. |
+| `sdk/web/src/realtime.ts` | **8.3** OpenAI Realtime over browser **WebRTC**: mic up / model voice down, events over a data channel, `[POINT]` tags → pointing engine. |
+| `sdk/web/demo/index.html` | Demo host page (`bun run demo`). |
+
+> Live mode (8.3) activates when `backendUrl` is set; otherwise a simulated turn lifecycle keeps the embed demonstrable key-free. Validated: `bun test` 9/9 (prompt + token), `tsc` + `bun run build` clean; Playwright confirms the widget mounts, the cursor lands **exactly** on a `data-skilly` element (0px, 8.2), and live mode fetches a token from the backend cross-origin and handles failure gracefully (8.3). The live WebRTC↔OpenAI audio loop needs a real `OPENAI_API_KEY` + mic (validated by a live session, not headless). Next: **8.5** dashboard · **8.6** billing. `dist/`, `node_modules/`, `generated/` are gitignored.
+
+### Web backend (`apps/web-backend`) — Web SDK Phases 8.4–8.6
+
+Multi-tenant control plane + dashboard + billing: **Next.js (App Router) + Tailwind + Postgres**, the successor to the Worker's `/openai/token` + Polar logic for the web SDK. Build via `bun install && bun run build` (the team's standard stack). Excluded from the Cargo workspace (it's a Node app).
+
+| File | Purpose |
+|------|---------|
+| `src/domain/{keys,origin,quota,openaiToken,skillValidation,billing}.ts` | Pure, unit-tested: pk_/sk_ format+hash, origin allowlist (incl. `*.domain`), usage quota, OpenAI mint, SKILL.md safety scan, Polar Standard-Webhooks verify + event→cap + checkout body. |
+| `src/db/*` | `WebBackendRepo` interface + Postgres (`pg`) + in-memory (seeded demo) impls; `getRepo()` picks by `DATABASE_URL`. Dashboard + billing ops (key CRUD, skill save, usage summary, `setTenantUsageCap`). |
+| `src/tenantService.ts` | Framework-free auth → quota → mint orchestration. |
+| `src/app/api/web/{token,skill,usage,checkout}/route.ts` + `webhooks/polar` | Routes: mint token, serve SKILL.md, meter session seconds, start checkout, Polar webhook (verified → set cap). |
+| `src/app/dashboard/**` | Dashboard UI (Tailwind): usage, **plan + upgrade**, key management, SKILL.md editor (validate-on-save) + server `actions.ts`. |
+| `src/lib/session.ts` | Tenant resolution — dev = seeded demo tenant; prod = WorkOS session (follow-up). |
+| `db/schema.sql` | Postgres schema (tenants, api_keys, tenant_skills, usage_events). |
+
+> Env: `OPENAI_API_KEY`, `DATABASE_URL` (optional), `POLAR_{ACCESS_TOKEN,PRODUCT_ID,WEBHOOK_SECRET,PLAN_CAP_SECONDS}`. Validated: `bun test` **27/27**, `tsc` + `next build` clean, and Playwright end-to-end — token (401/403/500/200), dashboard (key reveal, skill validation), and **billing**: meter usage → signed Polar webhook (bad sig **401**) sets the cap → dashboard shows the new plan (`600 min/month`, `2/600 used`). Internal imports are extensionless (Next webpack doesn't resolve `.js`→`.ts`). **The web SDK is now functionally complete (8.0–8.6).**
+
 ### Skill Files
 
 The repo ships 5 bundled skills under `skills/`, also copied into the app bundle under `Resources/skills/` so new users get them without downloading anything.
@@ -283,3 +390,66 @@ When you make changes to this project that affect the information in this file, 
 6. **Line count drift**: If a file's line count changes significantly (>50 lines), update the approximate count in the Key Files table
 
 Do NOT update this file for minor edits, bug fixes, or changes that don't affect the documented architecture or conventions.
+
+# context-mode — MANDATORY routing rules
+
+You have context-mode MCP tools available. These rules are NOT optional — they protect your context window from flooding. A single unrouted command can dump 56 KB into context and waste the entire session.
+
+## BLOCKED commands — do NOT attempt these
+
+### curl / wget — BLOCKED
+Any Bash command containing `curl` or `wget` is intercepted and replaced with an error message. Do NOT retry.
+Instead use:
+- `ctx_fetch_and_index(url, source)` to fetch and index web pages
+- `ctx_execute(language: "javascript", code: "const r = await fetch(...)")` to run HTTP calls in sandbox
+
+### Inline HTTP — BLOCKED
+Any Bash command containing `fetch('http`, `requests.get(`, `requests.post(`, `http.get(`, or `http.request(` is intercepted and replaced with an error message. Do NOT retry with Bash.
+Instead use:
+- `ctx_execute(language, code)` to run HTTP calls in sandbox — only stdout enters context
+
+### WebFetch — BLOCKED
+WebFetch calls are denied entirely. The URL is extracted and you are told to use `ctx_fetch_and_index` instead.
+Instead use:
+- `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` to query the indexed content
+
+## REDIRECTED tools — use sandbox equivalents
+
+### Bash (>20 lines output)
+Bash is ONLY for: `git`, `mkdir`, `rm`, `mv`, `cd`, `ls`, `npm install`, `pip install`, and other short-output commands.
+For everything else, use:
+- `ctx_batch_execute(commands, queries)` — run multiple commands + search in ONE call
+- `ctx_execute(language: "shell", code: "...")` — run in sandbox, only stdout enters context
+
+### Read (for analysis)
+If you are reading a file to **Edit** it → Read is correct (Edit needs content in context).
+If you are reading to **analyze, explore, or summarize** → use `ctx_execute_file(path, language, code)` instead. Only your printed summary enters context. The raw file content stays in the sandbox.
+
+### Grep (large results)
+Grep results can flood context. Use `ctx_execute(language: "shell", code: "grep ...")` to run searches in sandbox. Only your printed summary enters context.
+
+## Tool selection hierarchy
+
+1. **GATHER**: `ctx_batch_execute(commands, queries)` — Primary tool. Runs all commands, auto-indexes output, returns search results. ONE call replaces 30+ individual calls.
+2. **FOLLOW-UP**: `ctx_search(queries: ["q1", "q2", ...])` — Query indexed content. Pass ALL questions as array in ONE call.
+3. **PROCESSING**: `ctx_execute(language, code)` | `ctx_execute_file(path, language, code)` — Sandbox execution. Only stdout enters context.
+4. **WEB**: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` — Fetch, chunk, index, query. Raw HTML never enters context.
+5. **INDEX**: `ctx_index(content, source)` — Store content in FTS5 knowledge base for later search.
+
+## Subagent routing
+
+When spawning subagents (Agent/Task tool), the routing block is automatically injected into their prompt. Bash-type subagents are upgraded to general-purpose so they have access to MCP tools. You do NOT need to manually instruct subagents about context-mode.
+
+## Output constraints
+
+- Keep responses under 500 words.
+- Write artifacts (code, configs, PRDs) to FILES — never return them as inline text. Return only: file path + 1-line description.
+- When indexing content, use descriptive source labels so others can `ctx_search(source: "label")` later.
+
+## ctx commands
+
+| Command | Action |
+|---------|--------|
+| `ctx stats` | Call the `ctx_stats` MCP tool and display the full output verbatim |
+| `ctx doctor` | Call the `ctx_doctor` MCP tool, run the returned shell command, display as checklist |
+| `ctx upgrade` | Call the `ctx_upgrade` MCP tool, run the returned shell command, display as checklist |
