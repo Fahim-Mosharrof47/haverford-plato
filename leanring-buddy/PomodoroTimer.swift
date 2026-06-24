@@ -72,11 +72,15 @@ final class PomodoroTimer: ObservableObject {
 
     // MARK: - Controls
 
-    /// Start a new set (from idle) or resume after a pause.
-    func start() {
+    /// Start a new set (from idle) or resume after a pause. `minutes`/`topic` are honored only
+    /// when starting a fresh set (e.g. from a voice command); they are ignored on resume.
+    func start(minutes: Int? = nil, topic: String? = nil) {
+        if let topic, !topic.isEmpty {
+            focusTopic = topic
+        }
         if phase == .idle {
             let settings = AppSettings.shared
-            workMinutes = settings.pomodoroWorkMinutes
+            workMinutes = minutes ?? settings.pomodoroWorkMinutes
             breakMinutes = settings.pomodoroBreakMinutes
             sessionsPerBlock = settings.pomodoroSessionsPerBlock
             currentSession = 1
@@ -85,6 +89,26 @@ final class PomodoroTimer: ObservableObject {
             isRunning = true
             startTicker()
         }
+    }
+
+    // MARK: - Plato — Voice-command controls
+
+    /// Resume a paused countdown. No-op if idle or already running.
+    func resume() {
+        guard phase != .idle, !isRunning else { return }
+        isRunning = true
+        startTicker()
+    }
+
+    /// Stop the timer and return to idle (alias of reset, named for the voice command).
+    func stop() {
+        reset()
+    }
+
+    /// End the current break early and advance to the next focus block. No-op outside a break.
+    func skipBreak() {
+        guard phase == .breakTime else { return }
+        finishBreak()
     }
 
     /// Pause the countdown without losing the current phase or remaining time.

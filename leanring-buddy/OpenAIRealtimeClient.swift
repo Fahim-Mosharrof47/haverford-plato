@@ -419,6 +419,35 @@ final class OpenAIRealtimeClient: ObservableObject {
             ]
         ]
 
+        // MARK: - Plato — control_pomodoro tool
+        // Lets the user drive the focus (Pomodoro) timer by voice. All actions are local and
+        // synchronous; CompanionManager performs them and returns the new timer state via
+        // sendToolResultAndContinue so the model speaks a brief confirmation/answer.
+        let controlPomodoroTool: [String: Any] = [
+            "type": "function",
+            "name": "control_pomodoro",
+            "description": "Control the user's focus (Pomodoro) timer when they ask by voice. Use 'start' to begin a focus block (optionally with 'minutes' and a 'topic', e.g. 'start a 25 minute block on my thesis intro'); 'pause' / 'resume' / 'stop' to control the running timer; 'skip_break' to end a break early; 'status' to report how much time is left and which block they're on; and 'set_topic' to record what the user is working on. Call 'set_topic' right after the user answers your start-of-block question about what they're working on. After any action, briefly confirm aloud what you did in one short sentence.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "action": [
+                        "type": "string",
+                        "enum": ["start", "pause", "resume", "stop", "skip_break", "status", "set_topic"],
+                        "description": "The timer action to perform."
+                    ],
+                    "minutes": [
+                        "type": "integer",
+                        "description": "Focus block length in minutes for 'start' (1–180). Omit to use the user's configured default."
+                    ],
+                    "topic": [
+                        "type": "string",
+                        "description": "What the user is working on, for 'start' or 'set_topic'."
+                    ]
+                ],
+                "required": ["action"]
+            ]
+        ]
+
         // MARK: - Skilly — GA Realtime session.update shape (2026-05-30)
         // The Realtime Beta API used flat fields (modalities, input_audio_format,
         // input_audio_transcription, turn_detection, voice) plus an implicit
@@ -459,7 +488,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool, searchScholarTool],
+            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool],
             "tool_choice": "auto",
         ]
 
