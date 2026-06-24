@@ -384,18 +384,27 @@ struct BlueCursorView: View {
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            Image("SkillyCursor")
-                .renderingMode(.template)  // Plato: tint the cursor to ink (paper aesthetic), not orange
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 20, height: 20)
-                .foregroundColor(DS.Colors.overlayCursorBlue)
-                // No rotation — the logo PNG has the correct direction built in.
-                // The old Triangle shape needed rotation; the logo image does not.
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
-                .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
-                .position(cursorPosition)
+            // Plato: ink cursor with a white outline behind it (a slightly larger white copy)
+            // so it stays visible on dark backgrounds. Soft shadow adds depth on light ones.
+            ZStack {
+                Image("SkillyCursor")
+                    .renderingMode(.template)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 23, height: 23)
+                    .foregroundColor(.white)
+                Image("SkillyCursor")
+                    .renderingMode(.template)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 20, height: 20)
+                    .foregroundColor(DS.Colors.overlayCursorBlue)
+            }
+            // No rotation — the logo PNG has the correct direction built in.
+            .shadow(color: Color.black.opacity(0.35), radius: 3 + (buddyFlightScale - 1.0) * 20, x: 0, y: 1)
+            .scaleEffect(buddyFlightScale)
+            .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
+            .position(cursorPosition)
                 .animation(
                     buddyNavigationMode == .followingCursor
                         ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
