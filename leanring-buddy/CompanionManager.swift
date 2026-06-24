@@ -154,7 +154,8 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Plato — Pomodoro focus timer
     /// Lazily created so its callbacks can capture a fully-initialized self. The panel UI
-    /// observes this object directly. Transitions drive the focus topic + spoken announcements.
+    /// observes this object directly. Plato stays SILENT on timer transitions — the only
+    /// time it speaks on its own is a distraction nudge during an active focus block (below).
     lazy var pomodoro: PomodoroTimer = {
         let timer = PomodoroTimer()
         timer.onFocusTopicChange = { [weak self] topic in
@@ -162,6 +163,7 @@ final class CompanionManager: ObservableObject {
             self?.sessionState.recordFocusTopic(topic)
         }
         timer.onWorkStart = { [weak self] session, total, topic in
+            self?.startFocusWatch()  // begin watching for distraction
             let focusClause = topic.isEmpty
                 ? " Briefly tell the user the focus block has started and you're here if they need you."
                 : " The user is focusing on: \"\(topic)\". Briefly acknowledge the focus block has started and that you'll help keep them on track."
@@ -171,6 +173,7 @@ final class CompanionManager: ObservableObject {
         }
         timer.onWorkEnd = { [weak self] _, _ in
             self?.sessionState.recordPomodoroCompleted()
+            self?.stopFocusWatch()
             self?.speakProactiveAnnouncement(
                 "The focus block just ended — it's break time. In one or two short sentences, congratulate the user and give a brief recap of what they worked on this block based on your recent conversation, then suggest a short break."
             )
@@ -183,12 +186,113 @@ final class CompanionManager: ObservableObject {
         return timer
     }()
 
-    /// Proactive spoken announcement for timer transitions. Best-effort: the underlying
-    /// requestForcedSpokenResponse no-ops unless the realtime session is already connected
-    /// (e.g. Live Tutor mode or an in-progress session). The panel UI still reflects the
-    /// transition when no session is live.
+    /// Speaks a one-off proactive line via the realtime session (no-op unless connected).
+    /// Used ONLY for distraction nudges during a focus block — Plato is otherwise silent.
     func speakProactiveAnnouncement(_ instruction: String) {
         openAIRealtimeClient.requestForcedSpokenResponse(instruction: instruction)
+    }
+
+    // MARK: - Plato — Focus watch (distraction nudges during an active focus block)
+
+    private var focusWatchTimer: Timer?
+    private var lastFocusNudgeAt: Date?
+    /// How often to glance at the screen during a focus block.
+    private let focusWatchIntervalSeconds: TimeInterval = 75
+    /// Minimum gap between spoken nudges so Plato never nags.
+    private let focusNudgeCooldownSeconds: TimeInterval = 180
+
+    private func startFocusWatch() {
+        stopFocusWatch()
+        // Ensure the session is connected so a nudge can actually be spoken.
+        startRealtimeSessionPrewarmIfNeeded()
+        focusWatchTimer = Timer.scheduledTimer(withTimeInterval: focusWatchIntervalSeconds, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.performFocusCheck() }
+        }
+    }
+
+    private func stopFocusWatch() {
+        focusWatchTimer?.invalidate()
+        focusWatchTimer = nil
+    }
+
+    /// Glances at the screen and, only if the user is clearly off-task relative to their declared
+    /// focus topic, speaks a single gentle nudge. Detection is a silent, cheap vision call — the
+    /// realtime voice is used only to deliver the nudge. Requires a BYOK OpenAI key.
+    private func performFocusCheck() {
+        guard pomodoro.phase == .work, pomodoro.isRunning else {
+            stopFocusWatch()
+            return
+        }
+        let topic = (currentFocusTopic ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !topic.isEmpty else { return }  // need a declared topic to judge "off-task"
+        // Respect the cooldown — never nag.
+        if let last = lastFocusNudgeAt, Date().timeIntervalSince(last) < focusNudgeCooldownSeconds {
+            return
+        }
+
+        Task { @MainActor in
+            guard let capture = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first else { return }
+            let result = await classifyFocus(jpeg: capture.imageData, topic: topic)
+            guard result.distracted, pomodoro.phase == .work, pomodoro.isRunning else { return }
+            lastFocusNudgeAt = Date()
+            let reasonClause = result.reason.map { " (looks like \($0))" } ?? ""
+            speakProactiveAnnouncement(
+                "The user is in a focus session working on \"\(topic)\" but their screen looks off-task\(reasonClause). "
+                + "Give ONE short, friendly nudge to get back to it — amused, like a labmate, not preachy. "
+                + "Do not mention that you are watching their screen."
+            )
+        }
+    }
+
+    /// Silent off-task classifier: asks a cheap vision model whether the screenshot is off-task
+    /// for the focus topic. Returns (distracted, reason). No-ops (returns not-distracted) when no
+    /// BYOK key is set. Never throws.
+    private func classifyFocus(jpeg: Data, topic: String) async -> (distracted: Bool, reason: String?) {
+        let key = AppSettings.shared.openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            return (false, nil)
+        }
+        let dataURL = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+        let body: [String: Any] = [
+            "model": "gpt-4o-mini",
+            "max_tokens": 60,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "text", "text":
+                        "The user is in a focus session working on: \"\(topic)\". Look at this screenshot of their screen. "
+                        + "Are they CLEARLY off-task — social media, YouTube/video, games, shopping, or unrelated browsing? "
+                        + "If it could plausibly relate to their work, or you're unsure, treat it as NOT distracted. "
+                        + "Reply with ONLY compact JSON: {\"distracted\": true|false, \"reason\": \"<a few words>\"}."],
+                    ["type": "image_url", "image_url": ["url": dataURL]],
+                ],
+            ]],
+        ]
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            return (false, nil)
+        }
+
+        // The model may wrap JSON in ``` fences — strip them before parsing.
+        let cleaned = content
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let parsedData = cleaned.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: parsedData) as? [String: Any] {
+            return ((parsed["distracted"] as? Bool) ?? false, parsed["reason"] as? String)
+        }
+        return (cleaned.lowercased().contains("\"distracted\": true"), nil)
     }
 
     // MARK: - Plato — Local session state + re-entry briefing
@@ -2028,6 +2132,7 @@ final class CompanionManager: ObservableObject {
 
     /// Plato introduces itself on first run: a best-effort spoken greeting (when the realtime
     /// session connects — e.g. a BYOK key is set) plus a visible text intro that always appears.
+    /// This one-time intro is the only proactive speech besides focus-block distraction nudges.
     private func performPlatoIntro() {
         startRealtimeSessionPrewarmIfNeeded()
         // Give the socket a moment to connect, then have Plato speak its introduction.

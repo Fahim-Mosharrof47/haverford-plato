@@ -117,23 +117,39 @@ final class MenuBarPanelManager: NSObject {
     private func makeSkillyMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
 
-        // Plato: use the bust logo as the menu bar mark, rendered as a template silhouette
-        // (template = alpha-only, tinted by the menu bar appearance). Falls back to the drawn
-        // cursor arrow if the asset can't be loaded.
+        // Plato: INVERSE bust mark — a filled rounded tile with the bust silhouette knocked
+        // out (negative space), so the bust reads as the menu-bar color showing through.
+        // Template (alpha-only) so the filled field tints to the menu bar appearance.
+        // Falls back to the drawn cursor arrow if the asset can't be loaded.
         if let logo = NSImage(named: "PlatoLogo"), logo.size.height > 0 {
+            let icon = NSImage(size: NSSize(width: iconSize, height: iconSize))
+            icon.lockFocus()
+
+            // Filled rounded field.
+            let fieldRect = NSRect(x: 0.5, y: 0.5, width: iconSize - 1, height: iconSize - 1)
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: fieldRect, xRadius: 4, yRadius: 4).fill()
+
+            // Knock the bust out of the field (destinationOut subtracts the bust's alpha).
             let aspect = logo.size.width / logo.size.height
-            let size = NSSize(width: (iconSize * aspect).rounded(), height: iconSize)
-            let bust = NSImage(size: size)
-            bust.lockFocus()
+            let bustHeight = iconSize - 3
+            let bustWidth = bustHeight * aspect
+            let bustRect = NSRect(
+                x: (iconSize - bustWidth) / 2,
+                y: 1.5,
+                width: bustWidth,
+                height: bustHeight
+            )
             logo.draw(
-                in: NSRect(origin: .zero, size: size),
+                in: bustRect,
                 from: NSRect(origin: .zero, size: logo.size),
-                operation: .sourceOver,
+                operation: .destinationOut,
                 fraction: 1.0
             )
-            bust.unlockFocus()
-            bust.isTemplate = true
-            return bust
+
+            icon.unlockFocus()
+            icon.isTemplate = true
+            return icon
         }
 
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
