@@ -116,7 +116,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
-        registerAsLoginItemIfNeeded()
+        unregisterLoginItemIfNeeded()
         // startSparkleUpdater()
     }
 
@@ -126,24 +126,30 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         companionManager.stop()
     }
 
-    /// Registers the app as a login item so it launches automatically on
-    /// startup. Uses SMAppService which shows the app in System Settings >
-    /// General > Login Items, letting the user toggle it off if they want.
-    private func registerAsLoginItemIfNeeded() {
+    // MARK: - Plato — Do NOT auto-launch at login.
+    /// Plato should only run when the user explicitly launches it (e.g. by
+    /// building & running from Xcode). Earlier builds registered the app as a
+    /// macOS login item on every launch via `SMAppService.mainApp.register()`,
+    /// which made it start automatically on every login and stay "always on".
+    /// This actively removes any such leftover registration so the app no
+    /// longer starts on login. It is a no-op once nothing is registered.
+    private func unregisterLoginItemIfNeeded() {
         let loginItemService = SMAppService.mainApp
-        if loginItemService.status != .enabled {
+        switch loginItemService.status {
+        case .enabled, .requiresApproval:
             do {
-                try loginItemService.register()
-                // MARK: - Skilly — Debug logging (stripped in release)
+                try loginItemService.unregister()
                 #if DEBUG
-                print("🎯 Skilly: Registered as login item")
+                print("🎯 Plato: Unregistered login item — will not start on login")
                 #endif
             } catch {
-                // MARK: - Skilly — Debug logging (stripped in release)
                 #if DEBUG
-                print("⚠️ Skilly: Failed to register as login item: \(error)")
+                print("⚠️ Plato: Failed to unregister login item: \(error)")
                 #endif
             }
+        default:
+            // .notRegistered / .notFound — nothing to remove.
+            break
         }
     }
 
