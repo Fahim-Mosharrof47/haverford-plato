@@ -7,6 +7,7 @@
 //  opens a floating panel with companion voice controls.
 //
 
+import AppKit
 import CoreText
 import ServiceManagement
 import SwiftUI
@@ -52,6 +53,20 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // MARK: - Plato — Single-instance guard.
+        // Plato is a menu-bar (LSUIElement) app with no Dock icon, so older copies are easy to
+        // leave running (a login-item launch plus an Xcode/manual launch). Two instances both
+        // run the intro / timer announcements / focus nudges and speak over each other. Terminate
+        // any older copies so only this (newest) instance survives.
+        let currentProcessID = NSRunningApplication.current.processIdentifier
+        let duplicateInstances = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == Bundle.main.bundleIdentifier
+                && $0.processIdentifier != currentProcessID
+        }
+        for duplicate in duplicateInstances {
+            duplicate.terminate()
+        }
+
         // MARK: - Skilly — Debug logging (stripped in release)
         #if DEBUG
         print("🎯 Skilly: Starting...")
