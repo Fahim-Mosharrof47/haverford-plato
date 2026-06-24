@@ -291,6 +291,9 @@ struct SettingsView: View {
                 settingsPicker(
                     selection: $settings.pushToTalkShortcut,
                     options: [
+                        // MARK: - Plato — ctrl+option+0 is the default (a real key-combo, immune to
+                        // bare-modifier chord collisions like the Raycast hyper key / ctrl+shift+tab).
+                        ("controlOptionZero", "Ctrl + Option + 0"),
                         ("controlOption", "Ctrl + Option"),
                         ("shiftControl", "Shift + Ctrl"),
                         ("shiftFunction", "Shift + Fn"),

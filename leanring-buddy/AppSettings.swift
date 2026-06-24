@@ -236,7 +236,8 @@ final class AppSettings: ObservableObject {
             : UserDefaults.standard.bool(forKey: "autoDetectLanguage")
 
         // Shortcuts
-        self.pushToTalkShortcut = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlOption"
+        // MARK: - Plato — Default ctrl+option+0 (was control+option); see BuddyPushToTalkShortcut.
+        self.pushToTalkShortcut = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlOptionZero"
         self.cancelKeyCode = UInt16(UserDefaults.standard.integer(forKey: "cancelKeyCode") == 0
             ? 53  // Default: Escape
             : UserDefaults.standard.integer(forKey: "cancelKeyCode"))

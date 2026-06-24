@@ -137,6 +137,9 @@ final class CompanionManager: ObservableObject {
     private var didReceiveAnyAudioChunkForCurrentTurn = false
     private var pendingToolCallIdForCurrentTurn: String?
     private var isAwaitingForcedSpokenFollowUp = false
+    // MARK: - Plato — Set while a focus block is being started by a voice command, so the
+    // onWorkStart announcement is suppressed (the tool continuation speaks the confirmation).
+    private var isVoiceInitiatedPomodoroStart = false
 
     // MARK: - Plato — In-flight async research tool calls (search_scholar).
     // Deliberately NOT reset on turn boundaries (push-to-talk start / VAD speech_started):
@@ -163,13 +166,26 @@ final class CompanionManager: ObservableObject {
             self?.sessionState.recordFocusTopic(topic)
         }
         timer.onWorkStart = { [weak self] session, total, topic in
-            self?.startFocusWatch()  // begin watching for distraction
-            let focusClause = topic.isEmpty
-                ? " Briefly tell the user the focus block has started and you're here if they need you."
-                : " The user is focusing on: \"\(topic)\". Briefly acknowledge the focus block has started and that you'll help keep them on track."
-            self?.speakProactiveAnnouncement(
-                "A focus block just started (block \(session) of \(total))." + focusClause + " Keep it to one short sentence."
-            )
+            guard let self else { return }
+            self.startFocusWatch()  // begin watching for distraction
+            // MARK: - Plato — When the block was started by a voice command, the tool
+            // continuation already speaks the confirmation — don't double-speak here.
+            if self.isVoiceInitiatedPomodoroStart {
+                self.isVoiceInitiatedPomodoroStart = false
+                return
+            }
+            let trimmedTopic = topic.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedTopic.isEmpty {
+                // No topic yet — ask what they're working on. The user answers by holding
+                // push-to-talk, and the model records the answer via control_pomodoro(set_topic).
+                self.speakProactiveAnnouncement(
+                    "A focus block just started (block \(session) of \(total)). In ONE short, warm sentence, ask the user what they're working on this block so you can help keep them on track."
+                )
+            } else {
+                self.speakProactiveAnnouncement(
+                    "A focus block just started (block \(session) of \(total)). The user is focusing on: \"\(trimmedTopic)\". In ONE short sentence, acknowledge it and say you'll help keep them on track."
+                )
+            }
         }
         timer.onWorkEnd = { [weak self] _, _ in
             self?.sessionState.recordPomodoroCompleted()
@@ -197,7 +213,7 @@ final class CompanionManager: ObservableObject {
     private var focusWatchTimer: Timer?
     private var lastFocusNudgeAt: Date?
     /// How often to glance at the screen during a focus block.
-    private let focusWatchIntervalSeconds: TimeInterval = 75
+    private let focusWatchIntervalSeconds: TimeInterval = 20
     /// Minimum gap between spoken nudges so Plato never nags.
     private let focusNudgeCooldownSeconds: TimeInterval = 180
 
@@ -292,7 +308,8 @@ final class CompanionManager: ObservableObject {
            let parsed = try? JSONSerialization.jsonObject(with: parsedData) as? [String: Any] {
             return ((parsed["distracted"] as? Bool) ?? false, parsed["reason"] as? String)
         }
-        return (cleaned.lowercased().contains("\"distracted\": true"), nil)
+        // MARK: - Plato — Parse failure ⇒ treat as on-task. Never nudge on uncertain output.
+        return (false, nil)
     }
 
     // MARK: - Plato — Local session state + re-entry briefing
@@ -898,7 +915,6 @@ final class CompanionManager: ObservableObject {
                     self.onboardingPromptText = ""
                 }
             }
-    
 
             SkillyAnalytics.trackPushToTalkStarted()
 
@@ -1064,6 +1080,100 @@ final class CompanionManager: ObservableObject {
             pendingResearchCallIds.remove(callId)
             openAIRealtimeClient.sendToolResultAndContinue(callId: callId, output: resultJSON)
         }
+    }
+
+    // MARK: - Plato — control_pomodoro tool handler
+
+    /// Handle a `control_pomodoro` function call: parse the action, drive the PomodoroTimer, and
+    /// return the resulting timer state to the model via `sendToolResultAndContinue` so Plato
+    /// speaks a brief confirmation. All actions are local/synchronous (no network await).
+    private func handlePomodoroToolCall(argumentsJSON: String, callId: String) {
+        var action = ""
+        var minutes: Int?
+        var topic: String?
+        if let data = argumentsJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            action = (object["action"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            if let rawMinutes = object["minutes"] as? Int {
+                minutes = rawMinutes
+            } else if let rawMinutes = object["minutes"] as? Double {
+                minutes = Int(rawMinutes)
+            } else if let rawMinutes = object["minutes"] as? String, let parsed = Int(rawMinutes) {
+                minutes = parsed
+            }
+            topic = (object["topic"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let nonEmptyTopic = (topic?.isEmpty == false) ? topic : nil
+
+        switch action {
+        case "start":
+            // Suppress the onWorkStart announcement; the continuation below speaks the confirmation.
+            isVoiceInitiatedPomodoroStart = true
+            let clampedMinutes = minutes.map { min(max($0, 1), 180) }
+            pomodoro.start(minutes: clampedMinutes, topic: nonEmptyTopic)
+            isVoiceInitiatedPomodoroStart = false  // safety: clear even if no new block began (resume)
+        case "pause":
+            pomodoro.pause()
+        case "resume":
+            pomodoro.resume()
+        case "stop":
+            pomodoro.stop()
+        case "skip_break":
+            pomodoro.skipBreak()
+        case "set_topic":
+            if let nonEmptyTopic {
+                pomodoro.focusTopic = nonEmptyTopic
+                // PomodoroTimer.focusTopic.didSet only propagates onFocusTopicChange during a work
+                // block. The primary use (recording the answer to the block-start ask) happens in
+                // .work, so that path is covered. If the user names a topic while idle, mirror it to
+                // the live session here; beginWork() re-propagates at the next block start. During a
+                // break we intentionally leave the topic cleared (not focusing during a break).
+                if pomodoro.phase == .idle {
+                    currentFocusTopic = nonEmptyTopic
+                    sessionState.recordFocusTopic(nonEmptyTopic)
+                }
+            }
+        case "status":
+            break  // state is reported below
+        default:
+            openAIRealtimeClient.sendToolResultAndContinue(
+                callId: callId,
+                output: #"{"status":"error","message":"Unknown timer action."}"#
+            )
+            return
+        }
+
+        openAIRealtimeClient.sendToolResultAndContinue(callId: callId, output: pomodoroStateJSON())
+    }
+
+    /// Compact JSON snapshot of the focus timer for a tool result, so the model can confirm the
+    /// action or answer "how much time is left?" accurately. Never throws.
+    private func pomodoroStateJSON() -> String {
+        let phaseLabel: String
+        switch pomodoro.phase {
+        case .idle: phaseLabel = "idle"
+        case .work: phaseLabel = "focusing"
+        case .breakTime: phaseLabel = "break"
+        }
+        let secondsRemaining = max(pomodoro.secondsRemaining, 0)
+        let stateObject: [String: Any] = [
+            "status": "ok",
+            "phase": phaseLabel,
+            "running": pomodoro.isRunning,
+            "minutes_remaining": secondsRemaining / 60,
+            "seconds_remaining": secondsRemaining,
+            "current_block": pomodoro.currentSession,
+            "total_blocks": pomodoro.sessionsTotal,
+            "topic": pomodoro.focusTopic,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: stateObject),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+        return #"{"status":"ok"}"#
     }
 
     /// Fetch papers for the search_scholar tool. ALWAYS returns a JSON string suitable for
@@ -1981,6 +2091,8 @@ final class CompanionManager: ObservableObject {
                 pendingToolCallIdForCurrentTurn = callId
             case "search_scholar":
                 handleScholarToolCall(argumentsJSON: argumentsJSON, callId: callId)
+            case "control_pomodoro":
+                handlePomodoroToolCall(argumentsJSON: argumentsJSON, callId: callId)
             default:
                 #if DEBUG
                 print("[CompanionManager] Unknown tool call '\(name)' — closing with error output")
