@@ -2,21 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>LSUIElement</key>
-	<true/>
-	<!-- MARK: - Skilly — Sparkle auto-update configuration -->
-	<key>SUPublicEDKey</key>
-	<string>KiUhtvrpYp4WVEBSq2rACO173YwD/q6/8f1v3RfU6uE=</string>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/tryskilly/skilly/main/appcast.xml</string>
-	<key>VoiceTranscriptionProvider</key>
-	<string>assemblyai</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Skilly uses your microphone so you can talk to it</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Skilly needs screen recording access to see your screen and help you learn.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Skilly uses speech recognition to transcribe your voice when you talk to it</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -28,5 +13,13 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Skilly needs screen recording access to see your screen and help you learn.</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/tryskilly/skilly/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>KiUhtvrpYp4WVEBSq2rACO173YwD/q6/8f1v3RfU6uE=</string>
+	<key>VoiceTranscriptionProvider</key>
+	<string>assemblyai</string>
 </dict>
 </plist>

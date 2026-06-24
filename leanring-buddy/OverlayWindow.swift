@@ -261,6 +261,7 @@ struct BlueCursorView: View {
                 Text(companionManager.onboardingPromptText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white)
+                    .multilineTextAlignment(.leading)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(
@@ -268,7 +269,10 @@ struct BlueCursorView: View {
                             .fill(DS.Colors.overlayCursorBlue)
                             .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
-                    .fixedSize()
+                    // Plato: cap width so a long prompt wraps into a small bubble instead of
+                    // stretching into a screen-wide bar.
+                    .frame(maxWidth: 240, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .overlay(
                         GeometryReader { geo in
                             Color.clear
@@ -303,10 +307,11 @@ struct BlueCursorView: View {
                     .padding(.vertical, 8)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(DS.Colors.surface1.opacity(0.95))
+                            // Plato: ink bubble so the paper-colored text stays readable over any app.
+                            .fill(DS.Colors.overlayCursorBlue.opacity(0.95))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(DS.Colors.borderSubtle.opacity(0.6), lineWidth: 0.7)
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 0.7)
                             )
                     )
                     .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 4)
@@ -380,9 +385,11 @@ struct BlueCursorView: View {
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
             Image("SkillyCursor")
+                .renderingMode(.template)  // Plato: tint the cursor to ink (paper aesthetic), not orange
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 20, height: 20)
+                .foregroundColor(DS.Colors.overlayCursorBlue)
                 // No rotation — the logo PNG has the correct direction built in.
                 // The old Triangle shape needed rotation; the logo image does not.
                 .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)

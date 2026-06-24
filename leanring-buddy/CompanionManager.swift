@@ -878,7 +878,12 @@ final class CompanionManager: ObservableObject {
     RESEARCH & CITATIONS: You have a search_scholar tool that returns REAL academic papers. \
     When the user asks about research, asks who studied or proved something, wants citations, \
     or asks what to read, call search_scholar — do not answer about specific papers from memory. \
-    Cite ONLY papers the tool returns, each by its exact title, first author (et al. if more), and year. \
+    Cite ONLY papers the tool returns, each by its exact title and first author (et al. if more). \
+    If the tool returns a paper matching what the user asked for, report it as FOUND — state its exact \
+    title and first author — even if the year or venue looks unusual or the record is marked a preprint. \
+    Do NOT claim you couldn't find a paper when the tool actually returned a match. \
+    Give the year only if the tool provides one; year and venue may be missing or approximate for \
+    preprints, so if a year looks off or is absent, say you're not certain rather than stating it as fact. \
     Never invent or recall a title, author, year, journal, or DOI. If a returned paper has no summary, \
     say so rather than guessing. If the tool reports no results, an error, or a rate limit, tell the user \
     you could not find or reach the literature and suggest rephrasing — never fabricate a source.
@@ -957,38 +962,236 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Fetch papers from the Worker `/papers` route. ALWAYS returns a JSON string suitable for
+    /// Fetch papers for the search_scholar tool. ALWAYS returns a JSON string suitable for
     /// `function_call_output` — never throws, never returns empty — so the model is never left
-    /// hanging. On any failure it returns an honest-failure contract the persona knows to relay.
+    /// hanging. Prefers the Worker `/papers` route when a worker session exists (deployed-worker
+    /// path: hides an API key + rate-limits); otherwise queries Semantic Scholar directly from
+    /// the app (the BYOK / no-server path — free tier, no key required).
     private func fetchScholarPapers(query: String, limit: Int) async -> String {
-        let errorOutput = #"{"status":"error","papers":[],"message":"Could not reach the research service."}"#
-
-        guard let url = URL(string: "\(AppSettings.shared.workerBaseURL)/papers") else {
-            return errorOutput
+        if let workerResult = await fetchScholarPapersViaWorker(query: query, limit: limit) {
+            return workerResult
         }
+        return await fetchScholarPapersDirect(query: query, limit: limit)
+    }
 
+    /// Returns the Worker `/papers` contract JSON, or nil when there's no worker session or the
+    /// call fails/404s (e.g. the default Skilly worker has no /papers route) — so the caller
+    /// falls back to a direct Semantic Scholar query.
+    private func fetchScholarPapersViaWorker(query: String, limit: Int) async -> String? {
+        guard let url = URL(string: "\(AppSettings.shared.workerBaseURL)/papers") else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        guard AuthManager.shared.applyWorkerSessionAuthorization(to: &request) else {
-            return #"{"status":"error","papers":[],"message":"You need to be signed in to search papers."}"#
-        }
-
+        guard AuthManager.shared.applyWorkerSessionAuthorization(to: &request) else { return nil }
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query, "limit": limit])
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
-                  let bodyString = String(data: data, encoding: .utf8),
-                  !bodyString.isEmpty else {
-                return errorOutput
-            }
-            // The Worker already formats the tool-output contract; pass it through verbatim.
-            return bodyString
-        } catch {
-            return errorOutput
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let body = String(data: data, encoding: .utf8), !body.isEmpty else {
+            return nil
         }
+        return body
+    }
+
+    /// Direct Semantic Scholar query from the app — no server, no key (free tier). Builds the
+    /// same tool-output contract the Worker does, with strict per-paper provenance (explicit
+    /// nulls) so the model cites only what's returned.
+    // MARK: - Plato — Direct scholarly metadata sources (no server, BYOK path)
+
+    private enum ScholarFetchOutcome {
+        case papers([[String: Any]])   // usable results
+        case empty                      // source responded but found nothing
+        case unavailable                // network / rate-limit / auth / bad-response — try next source
+    }
+
+    /// Coalesce any optional to a JSON-serializable value: the value, or JSON null.
+    private func orNull(_ value: Any?) -> Any { value ?? NSNull() }
+
+    private func encodeContract(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let string = String(data: data, encoding: .utf8) else {
+            return #"{"status":"error","papers":[],"message":"Could not reach the research service."}"#
+        }
+        return string
+    }
+
+    private static let scholarDisclaimer =
+        "These are the only papers returned. Cite only these, by exact title and first author. "
+        + "Year and venue may be missing or approximate (especially for preprints) — give the year only if provided, "
+        + "say so if it seems uncertain, and never invent a year, venue, or DOI."
+
+    /// No-server paper search. Tries OpenAlex (best relevance), then Crossref (keyless DOI/metadata
+    /// fallback). ALWAYS returns the tool-output contract; never throws.
+    private func fetchScholarPapersDirect(query: String, limit: Int) async -> String {
+        let openAlex = await fetchOpenAlexPapers(query: query, limit: limit)
+        if case .papers(let papers) = openAlex {
+            return encodeContract(["status": "ok", "papers": papers, "disclaimer": Self.scholarDisclaimer])
+        }
+
+        let crossref = await fetchCrossrefPapers(query: query, limit: limit)
+        if case .papers(let papers) = crossref {
+            return encodeContract(["status": "ok", "papers": papers, "disclaimer": Self.scholarDisclaimer])
+        }
+
+        if case .empty = openAlex {
+            return encodeContract(["status": "no_results", "papers": [],
+                                   "message": "No papers found for that query. Try rephrasing."])
+        }
+        if case .empty = crossref {
+            return encodeContract(["status": "no_results", "papers": [],
+                                   "message": "No papers found for that query. Try rephrasing."])
+        }
+        return encodeContract(["status": "rate_limited", "papers": [],
+                               "message": "Could not reach the research service right now. Try again in a moment."])
+    }
+
+    /// Reconstructs OpenAlex's `abstract_inverted_index` ({word: [positions]}) into plain text,
+    /// capped for TTS brevity. Returns nil when the index is missing.
+    private func reconstructAbstract(_ raw: Any?) -> String? {
+        guard let invertedIndex = raw as? [String: Any], !invertedIndex.isEmpty else { return nil }
+        var positioned: [(Int, String)] = []
+        for (word, value) in invertedIndex {
+            let positions = (value as? [Int]) ?? (value as? [Any])?.compactMap { $0 as? Int } ?? []
+            for position in positions { positioned.append((position, word)) }
+        }
+        let words = positioned.sorted { $0.0 < $1.0 }.map { $0.1 }
+        guard !words.isEmpty else { return nil }
+        return words.prefix(80).joined(separator: " ")
+    }
+
+    /// OpenAlex `/works` relevance search — the primary source. Keyless works for light use; a
+    /// free `api_key` raises the daily budget. Handles a bad pasted key (401) by retrying keyless.
+    private func fetchOpenAlexPapers(query: String, limit: Int) async -> ScholarFetchOutcome {
+        func makeRequest(includeKey: Bool) -> URLRequest? {
+            var components = URLComponents(string: "https://api.openalex.org/works")
+            var items = [
+                URLQueryItem(name: "search", value: query),
+                URLQueryItem(name: "per_page", value: String(limit)),
+                URLQueryItem(name: "select", value: "id,title,publication_year,doi,cited_by_count,authorships,primary_location,abstract_inverted_index,type"),
+                URLQueryItem(name: "mailto", value: "plato@hyperspell.com"),
+            ]
+            let key = AppSettings.shared.openAlexAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if includeKey, !key.isEmpty {
+                items.append(URLQueryItem(name: "api_key", value: key))
+            }
+            components?.queryItems = items
+            guard let url = components?.url else { return nil }
+            return URLRequest(url: url)
+        }
+
+        func run(_ request: URLRequest) async -> (Data, HTTPURLResponse)? {
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { return nil }
+            return (data, http)
+        }
+
+        let hasKey = !AppSettings.shared.openAlexAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard let request = makeRequest(includeKey: true) else { return .unavailable }
+
+        var attempt = await run(request)
+        // A malformed/expired pasted key returns 401 — drop it and retry keyless once.
+        if hasKey, let (_, http) = attempt, http.statusCode == 401,
+           let keylessRequest = makeRequest(includeKey: false) {
+            attempt = await run(keylessRequest)
+        }
+
+        guard let (data, http) = attempt, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .unavailable
+        }
+
+        let rawWorks = (json["results"] as? [[String: Any]]) ?? []
+        if rawWorks.isEmpty { return .empty }
+
+        let papers: [[String: Any]] = rawWorks.prefix(limit).map { work in
+            let authors = ((work["authorships"] as? [[String: Any]]) ?? [])
+                .compactMap { ($0["author"] as? [String: Any])?["display_name"] as? String }
+                .prefix(6)
+            let doiURL = work["doi"] as? String
+            let bareDOI = doiURL?.replacingOccurrences(of: "https://doi.org/", with: "")
+            let venue = ((work["primary_location"] as? [String: Any])?["source"] as? [String: Any])?["display_name"] as? String
+            let abstract = reconstructAbstract(work["abstract_inverted_index"])
+            return [
+                "paperId": orNull(work["id"] as? String),
+                "title": orNull(work["title"] as? String),
+                "year": orNull(work["publication_year"] as? Int),
+                "authors": Array(authors),
+                "citationCount": orNull(work["cited_by_count"] as? Int),
+                "url": orNull(work["id"] as? String),
+                "venue": orNull(venue),
+                "type": orNull(work["type"] as? String),
+                "externalIds": [
+                    "DOI": orNull(bareDOI),
+                    "ArXiv": NSNull(),
+                ] as [String: Any],
+                "tldr": orNull(abstract),
+            ]
+        }
+        return .papers(papers)
+    }
+
+    /// Crossref `/works` keyless fallback (polite pool via mailto). Used for DOI/metadata when
+    /// OpenAlex is unavailable. Its relevance ranking is weaker, so it is a fallback, not primary.
+    private func fetchCrossrefPapers(query: String, limit: Int) async -> ScholarFetchOutcome {
+        var components = URLComponents(string: "https://api.crossref.org/works")
+        components?.queryItems = [
+            URLQueryItem(name: "query.bibliographic", value: query),
+            URLQueryItem(name: "sort", value: "relevance"),
+            URLQueryItem(name: "order", value: "desc"),
+            URLQueryItem(name: "rows", value: String(limit)),
+            URLQueryItem(name: "select", value: "DOI,title,author,published,container-title,is-referenced-by-count,abstract,type"),
+            URLQueryItem(name: "mailto", value: "plato@hyperspell.com"),
+        ]
+        guard let url = components?.url else { return .unavailable }
+        var request = URLRequest(url: url)
+        request.setValue("Plato/1.0 (mailto:plato@hyperspell.com)", forHTTPHeaderField: "User-Agent")
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? [String: Any] else {
+            return .unavailable
+        }
+
+        let items = (message["items"] as? [[String: Any]]) ?? []
+        if items.isEmpty { return .empty }
+
+        func stripJATS(_ text: String?) -> String? {
+            guard let text else { return nil }
+            let stripped = text
+                .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return stripped.isEmpty ? nil : String(stripped.prefix(600))
+        }
+
+        let papers: [[String: Any]] = items.prefix(limit).map { item in
+            let title = (item["title"] as? [String])?.first
+            let venue = (item["container-title"] as? [String])?.first
+            let doi = item["DOI"] as? String
+            let authors = ((item["author"] as? [[String: Any]]) ?? []).compactMap { author -> String? in
+                let name = [author["given"] as? String, author["family"] as? String]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+                return name.isEmpty ? nil : name
+            }.prefix(6)
+            let dateParts = (item["published"] as? [String: Any])?["date-parts"] as? [[Any]]
+            let year = dateParts?.first?.first as? Int
+            return [
+                "paperId": orNull(doi),
+                "title": orNull(title),
+                "year": orNull(year),
+                "authors": Array(authors),
+                "citationCount": orNull(item["is-referenced-by-count"] as? Int),
+                "url": orNull(doi.map { "https://doi.org/\($0)" }),
+                "venue": orNull(venue),
+                "type": orNull(item["type"] as? String),
+                "externalIds": [
+                    "DOI": orNull(doi),
+                    "ArXiv": NSNull(),
+                ] as [String: Any],
+                "tldr": orNull(stripJATS(item["abstract"] as? String)),
+            ]
+        }
+        return .papers(papers)
     }
 
     /// If the cursor is in transient mode (user toggled "Show Skilly" off),
@@ -1819,58 +2022,22 @@ final class CompanionManager: ObservableObject {
     /// Sets up the onboarding video player, starts playback, and schedules
     /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
     func setupOnboardingVideo() {
-        // MARK: - Skilly — Onboarding video URL is now configurable via AppSettings
-        let videoURLString = AppSettings.shared.onboardingVideoURL
-        guard !videoURLString.isEmpty, let videoURL = URL(string: videoURLString) else { return }
+        // MARK: - Plato — Farza's intro video is replaced by Plato introducing ITSELF.
+        performPlatoIntro()
+    }
 
-        let player = AVPlayer(url: videoURL)
-        player.isMuted = false
-        player.volume = 0.0
-        self.onboardingVideoPlayer = player
-        self.showOnboardingVideo = true
-        self.onboardingVideoOpacity = 0.0
-
-        // Start playback immediately — the video plays while invisible,
-        // then we fade in both the visual and audio over 1s.
-        player.play()
-
-        // Wait for SwiftUI to mount the view, then set opacity to 1.
-        // The .animation modifier on the view handles the actual animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.onboardingVideoOpacity = 1.0
-            // Fade audio volume from 0 → 1 over 2s to match visual fade
-            self.fadeInVideoAudio(player: player, targetVolume: 1.0, duration: 2.0)
+    /// Plato introduces itself on first run: a best-effort spoken greeting (when the realtime
+    /// session connects — e.g. a BYOK key is set) plus a visible text intro that always appears.
+    private func performPlatoIntro() {
+        startRealtimeSessionPrewarmIfNeeded()
+        // Give the socket a moment to connect, then have Plato speak its introduction.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.openAIRealtimeClient.requestForcedSpokenResponse(
+                instruction: "Introduce yourself as Plato, the user's academic research companion, in one warm spoken greeting of two or three sentences. Say you can see their screen and can help them read papers, write and proofread, debug code and statistics, find real citations, and stay focused with a built-in timer — and that they can hold Control and Option any time to talk to you. Be natural and welcoming; do not call any tools."
+            )
         }
-
-        // At 40 seconds into the video, trigger the onboarding demo where
-        // Skilly flies to something interesting on screen and comments on it
-        let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
-        onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
-            forTimes: [NSValue(time: demoTriggerTime)],
-            queue: .main
-        ) { [weak self] in
-            SkillyAnalytics.trackOnboardingDemoTriggered()
-            self?.performOnboardingDemoInteraction()
-        }
-
-        // Fade out and clean up when the video finishes
-        onboardingVideoEndObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            SkillyAnalytics.trackOnboardingVideoCompleted()
-            self.onboardingVideoOpacity = 0.0
-            // Wait for the 2s fade-out animation to complete before tearing down
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.tearDownOnboardingVideo()
-                // After the video disappears, stream in the prompt to try talking
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startOnboardingPromptStream()
-                }
-            }
-        }
+        // Visible text introduction — reliable even if the spoken intro can't connect yet.
+        startOnboardingPromptStream()
     }
 
     func tearDownOnboardingVideo() {
@@ -1888,7 +2055,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func startOnboardingPromptStream() {
-        let message = "press control + option and introduce yourself"
+        let message = "hi, i'm plato — your research companion. hold control + option and say hello"
         onboardingPromptText = ""
         showOnboardingPrompt = true
         onboardingPromptOpacity = 0.0

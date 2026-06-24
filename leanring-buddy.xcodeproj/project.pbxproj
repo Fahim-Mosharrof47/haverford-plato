@@ -42,8 +42,13 @@
 				"skills/blender-fundamentals/SKILL.md",
 				"skills/davinci-resolve-basics/SKILL.md",
 				"skills/figma-basics/SKILL.md",
-				"skills/premiere-pro-basics/SKILL.md",
+				"skills/latex-typesetting-texshop/SKILL.md",
+				"skills/microsoft-word-academic-writing/SKILL.md",
+				"skills/obsidian-research-notes/SKILL.md",
 				"skills/plato-academic-tutor/SKILL.md",
+				"skills/premiere-pro-basics/SKILL.md",
+				"skills/rstudio-statistics-tutor/SKILL.md",
+				"skills/zotero-reference-management/SKILL.md",
 			);
 			target = 28F22CBE2F56440300A0FC59 /* leanring-buddy */;
 		};
@@ -452,7 +457,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = N7Q3VWWMAP;
+				DEVELOPMENT_TEAM = G48BKY6LHF;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -466,14 +471,17 @@
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Plato;
 				INFOPLIST_KEY_CFBundleName = Skilly;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Skilly uses your microphone so you can talk to it";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Skilly needs screen recording access to see your screen and help you learn.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Skilly uses speech recognition to transcribe your voice when you talk to it";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = app.tryskilly.skilly;
+				PRODUCT_BUNDLE_IDENTIFIER = app.plato.fahim;
 				PRODUCT_NAME = Skilly;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
@@ -495,7 +503,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = N7Q3VWWMAP;
+				DEVELOPMENT_TEAM = G48BKY6LHF;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -509,14 +517,17 @@
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Plato;
 				INFOPLIST_KEY_CFBundleName = Skilly;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Skilly uses your microphone so you can talk to it";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Skilly needs screen recording access to see your screen and help you learn.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Skilly uses speech recognition to transcribe your voice when you talk to it";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = app.tryskilly.skilly;
+				PRODUCT_BUNDLE_IDENTIFIER = app.plato.fahim;
 				PRODUCT_NAME = Skilly;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;

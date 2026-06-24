@@ -180,6 +180,21 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(pomodoroSessionsPerBlock, forKey: "pomodoroSessionsPerBlock") }
     }
 
+    // MARK: - Plato — Research
+
+    /// Optional OpenAlex API key (primary paper-search source). Keyless works for light use
+    /// (~100 searches/day) but then rate-limits; a free key (openalex.org/settings/api) raises it
+    /// to ~1000/day. Sent as the `api_key` query param. Empty by default.
+    @Published var openAlexAPIKey: String {
+        didSet { UserDefaults.standard.set(openAlexAPIKey, forKey: "openAlexAPIKey") }
+    }
+
+    /// Optional Semantic Scholar API key (legacy / unused by the current OpenAlex-first path;
+    /// kept for forward compatibility). Empty by default.
+    @Published var semanticScholarAPIKey: String {
+        didSet { UserDefaults.standard.set(semanticScholarAPIKey, forKey: "semanticScholarAPIKey") }
+    }
+
     // MARK: - Init
 
     private init() {
@@ -250,6 +265,10 @@ final class AppSettings: ObservableObject {
         self.pomodoroSessionsPerBlock = UserDefaults.standard.object(forKey: "pomodoroSessionsPerBlock") == nil
             ? 4
             : UserDefaults.standard.integer(forKey: "pomodoroSessionsPerBlock")
+
+        // Plato — Research
+        self.openAlexAPIKey = UserDefaults.standard.string(forKey: "openAlexAPIKey") ?? ""
+        self.semanticScholarAPIKey = UserDefaults.standard.string(forKey: "semanticScholarAPIKey") ?? ""
 
         // Pipeline is always OpenAI Realtime
     }

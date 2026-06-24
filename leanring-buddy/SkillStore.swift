@@ -225,8 +225,13 @@ final class SkillStore: Sendable {
         "after-effects-basics",
         "davinci-resolve-basics",
         "premiere-pro-basics",
-        // MARK: - Plato
+        // MARK: - Plato — always-active academic persona + bundled academic-tool skills
         "plato-academic-tutor",
+        "rstudio-statistics-tutor",
+        "zotero-reference-management",
+        "obsidian-research-notes",
+        "microsoft-word-academic-writing",
+        "latex-typesetting-texshop",
     ]
 
     /// Seeds bundled skills into ~/.skilly/skills/ on launch.

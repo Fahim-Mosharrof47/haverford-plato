@@ -19,6 +19,8 @@ struct PanelBodyView: View {
     @ObservedObject var skillManager: SkillManager
     // MARK: - Plato — focus timer (owned by CompanionManager, observed here)
     @ObservedObject var pomodoro: PomodoroTimer
+    // MARK: - Plato — settings (timer durations live-edit + BYOK gate for the plan strip)
+    @ObservedObject var settings = AppSettings.shared
 
     @State private var hoveredSkillId: String?
     @State private var pendingDeletion: PendingDeletion?
@@ -45,10 +47,23 @@ struct PanelBodyView: View {
         return result
     }
 
+    /// Categories considered "study / research / writing" — these skills sort to the top.
+    private static let academicCategories: Set<String> = [
+        "statistics", "research-tools", "writing", "education", "academic",
+    ]
+
     private var installedSkills: [SkillDefinition] {
-        skillManager.installedSkills.filter { skill in
-            !activeNowSkills.contains(where: { $0.metadata.id == skill.metadata.id })
-        }
+        skillManager.installedSkills
+            .filter { skill in
+                !activeNowSkills.contains(where: { $0.metadata.id == skill.metadata.id })
+            }
+            .sorted { lhs, rhs in
+                // Plato: study/research/writing skills first, then the rest; alphabetical within.
+                let lhsAcademic = Self.academicCategories.contains(lhs.metadata.category.lowercased())
+                let rhsAcademic = Self.academicCategories.contains(rhs.metadata.category.lowercased())
+                if lhsAcademic != rhsAcademic { return lhsAcademic }
+                return lhs.metadata.name.localizedCaseInsensitiveCompare(rhs.metadata.name) == .orderedAscending
+            }
     }
 
     /// Friendly name of the frontmost app (e.g. "Figma"), derived from bundle ID.
@@ -63,7 +78,10 @@ struct PanelBodyView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PlanStrip()
+            // Plato: no trial/billing in the BYOK build — hide the plan strip entirely.
+            if !settings.hasOwnAPIKey {
+                PlanStrip()
+            }
             pomodoroSection
             activeNowSection
             installedSection
@@ -101,7 +119,7 @@ struct PanelBodyView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("FOCUS")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(DS.Fonts.sans(11, .semibold))
                     .foregroundColor(DS.Colors.accentText)
                     .tracking(0.8)
                 Spacer()
@@ -110,18 +128,19 @@ struct PanelBodyView: View {
                     .foregroundColor(accent)
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            // Centered clock + round counter.
+            VStack(spacing: 2) {
                 Text(pomodoro.displayTime)
-                    .font(.system(size: 34, weight: .medium, design: .monospaced))
+                    .font(DS.Fonts.mono(34, .medium))
                     .foregroundColor(pomodoro.phase == .idle ? DS.Colors.textTertiary : DS.Colors.textPrimary)
                     .tracking(1)
-
-                Spacer()
+                    .frame(maxWidth: .infinity, alignment: .center)
 
                 if pomodoro.phase != .idle {
                     Text("\(pomodoro.currentSession) of \(pomodoro.sessionsTotal)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .font(DS.Fonts.mono(11, .medium))
                         .foregroundColor(DS.Colors.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
 
@@ -135,8 +154,17 @@ struct PanelBodyView: View {
                     .padding(.vertical, 7)
                     .background(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                            .fill(Color.white.opacity(0.05))
+                            .fill(Color.black.opacity(0.05))
                     )
+            }
+
+            // Adjustable focus length, break length, and number of rounds — editable when idle.
+            if pomodoro.phase == .idle {
+                HStack(spacing: 8) {
+                    timerControl("FOCUS", value: $settings.pomodoroWorkMinutes, options: [15, 25, 45, 60], suffix: "m")
+                    timerControl("BREAK", value: $settings.pomodoroBreakMinutes, options: [5, 10, 15], suffix: "m")
+                    timerControl("ROUNDS", value: $settings.pomodoroSessionsPerBlock, options: [2, 3, 4, 5, 6], suffix: "")
+                }
             }
 
             HStack(spacing: 8) {
@@ -169,7 +197,7 @@ struct PanelBodyView: View {
                         .frame(width: 34, height: 34)
                         .background(
                             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(Color.white.opacity(0.05))
+                                .fill(Color.black.opacity(0.05))
                         )
                 }
                 .buttonStyle(.plain)
@@ -181,11 +209,11 @@ struct PanelBodyView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(isWork ? DS.Colors.accentSubtle : Color.white.opacity(0.04))
+                .fill(isWork ? DS.Colors.accentSubtle : Color.black.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .stroke(isWork ? DS.Colors.accent.opacity(0.25) : Color.white.opacity(0.08), lineWidth: 0.5)
+                .stroke(isWork ? DS.Colors.accent.opacity(0.25) : Color.black.opacity(0.08), lineWidth: 0.5)
         )
     }
 
@@ -205,6 +233,34 @@ struct PanelBodyView: View {
         }
     }
 
+    /// Compact labelled menu control for adjusting a timer setting inline on the focus card.
+    private func timerControl(_ label: String, value: Binding<Int>, options: [Int], suffix: String) -> some View {
+        VStack(spacing: 3) {
+            Text(label)
+                .font(DS.Fonts.sans(9, .semibold))
+                .tracking(0.4)
+                .foregroundColor(DS.Colors.textTertiary)
+            Menu {
+                ForEach(options, id: \.self) { option in
+                    Button("\(option)\(suffix)") { value.wrappedValue = option }
+                }
+            } label: {
+                Text("\(value.wrappedValue)\(suffix)")
+                    .font(DS.Fonts.mono(13, .medium))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                            .fill(Color.black.opacity(0.05))
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .pointerCursor()
+        }
+    }
+
     // MARK: - Active Now Section
 
     @ViewBuilder
@@ -212,7 +268,7 @@ struct PanelBodyView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("ACTIVE NOW")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(DS.Fonts.sans(11, .semibold))
                     .foregroundColor(DS.Colors.accentText)
                     .tracking(0.8)
 
@@ -265,7 +321,7 @@ struct PanelBodyView: View {
                 .foregroundColor(DS.Colors.textTertiary)
                 .frame(width: 40, height: 40)
                 .background(
-                    Circle().fill(Color.white.opacity(0.05))
+                    Circle().fill(Color.black.opacity(0.05))
                 )
 
             Text("No skills for \(appName)")
@@ -329,26 +385,30 @@ struct PanelBodyView: View {
                     }
 
                     // MARK: - Skilly — Tap the stage label to expand/collapse the full curriculum
-                    Button(action: {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            expandedStageListSkillId = isStageListExpanded ? nil : skill.metadata.id
+                    // Plato: only show curriculum stage + progress for skills that HAVE stages.
+                    // The always-active academic persona has no curriculum, so this is hidden for it.
+                    if totalStages > 0 {
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                expandedStageListSkillId = isStageListExpanded ? nil : skill.metadata.id
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Text("Stage \(stageNumber) of \(totalStages) · \(currentStageName)")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                                    .lineLimit(1)
+                                Image(systemName: isStageListExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                            }
                         }
-                    }) {
-                        HStack(spacing: 4) {
-                            Text("Stage \(stageNumber) of \(totalStages) · \(currentStageName)")
-                                .font(.system(size: 11))
-                                .foregroundColor(DS.Colors.textTertiary)
-                                .lineLimit(1)
-                            Image(systemName: isStageListExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 8, weight: .semibold))
-                                .foregroundColor(DS.Colors.textTertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                        .buttonStyle(.plain)
+                        .pointerCursor()
 
-                    progressBar(completed: progress?.completedStageIds.count ?? 0, total: totalStages)
-                        .padding(.top, 2)
+                        progressBar(completed: progress?.completedStageIds.count ?? 0, total: totalStages)
+                            .padding(.top, 2)
+                    }
                 }
             }
 
@@ -380,7 +440,7 @@ struct PanelBodyView: View {
 
     private func stateBadge(isPaused: Bool) -> some View {
         Text(isPaused ? "PAUSED" : "AUTO")
-            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .font(DS.Fonts.sans(9, .semibold))
             .foregroundColor(isPaused ? DS.Colors.textTertiary : DS.Colors.accentText)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
@@ -394,7 +454,7 @@ struct PanelBodyView: View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.white.opacity(0.08))
+                    .fill(Color.black.opacity(0.08))
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(DS.Colors.accent)
                     .frame(
@@ -489,7 +549,7 @@ struct PanelBodyView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("INSTALLED")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(DS.Fonts.sans(11, .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
                     .tracking(0.8)
 
@@ -528,7 +588,7 @@ struct PanelBodyView: View {
 
         return HStack(alignment: .top, spacing: 10) {
             Circle()
-                .fill(Color.white.opacity(0.25))
+                .fill(Color.black.opacity(0.25))
                 .frame(width: 6, height: 6)
                 .padding(.top, 6)
 
@@ -565,7 +625,7 @@ struct PanelBodyView: View {
         .padding(.horizontal, 8)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                .fill(isHovered ? Color.white.opacity(0.04) : Color.clear)
+                .fill(isHovered ? Color.black.opacity(0.04) : Color.clear)
         )
         .contentShape(Rectangle())
         .contextMenu {
@@ -606,11 +666,11 @@ struct PanelBodyView: View {
             .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .fill(Color.white.opacity(0.04))
+                    .fill(Color.black.opacity(0.04))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                    .stroke(Color.black.opacity(0.08), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)

@@ -24,60 +24,64 @@ enum DS {
         // ── Backgrounds (Warm Gray) ─────────────────────────────────
         // Layered surfaces from deepest to most elevated.
 
-        /// The deepest background — app panel, dark hero.
-        static let background = Color(hex: "#1C1C1E")        // gray-900
+        // Plato: LIGHT "paper" mode — Quartz paper surfaces, Onyx ink. Monochrome.
 
-        /// First elevation layer — card surfaces in dark mode.
-        static let surface1 = Color(hex: "#27272A")           // gray-800
+        /// The deepest background — app panel, app chrome.  (Plato: Quartz paper)
+        static let background = Color(hex: "#E9E9E9")
+
+        /// First elevation layer — panel / card surfaces.
+        static let surface1 = Color(hex: "#E1E1E1")
 
         /// Second elevation layer — input fields, elevated cards.
-        static let surface2 = Color(hex: "#3F3F3D")           // gray-700
+        static let surface2 = Color(hex: "#D8D8D8")
 
         /// Third elevation layer — hover backgrounds.
-        static let surface3 = Color(hex: "#525250")           // gray-600
+        static let surface3 = Color(hex: "#CFCFCF")
 
         /// Fourth elevation layer — active/pressed states.
-        static let surface4 = Color(hex: "#525250")           // gray-600
+        static let surface4 = Color(hex: "#C6C6C6")
 
         /// Secondary surface — dropdown backgrounds, button fills.
-        static let surfaceSecondary = Color.white.opacity(0.08)
+        static let surfaceSecondary = Color.black.opacity(0.05)
 
         // ── Borders ──────────────────────────────────────────────────
 
         /// Subtle border — card outlines, dividers. 0.5px solid.
-        static let borderSubtle = Color.white.opacity(0.08)
+        static let borderSubtle = Color.black.opacity(0.10)
 
         /// Strong border — focused inputs, hovered card outlines.
-        static let borderStrong = Color.white.opacity(0.15)
+        static let borderStrong = Color.black.opacity(0.18)
 
         // ── Text ─────────────────────────────────────────────────────
 
-        /// Primary text — headings, body text on dark backgrounds.
-        static let textPrimary = Color(hex: "#E5E5E0")       // gray-200
+        /// Primary text — ink on paper.                            (Plato: Onyx)
+        static let textPrimary = Color(hex: "#262323")
 
-        /// Secondary text — descriptions, hints.
-        static let textSecondary = Color(hex: "#A3A39E")      // gray-400
+        /// Secondary text — descriptions, hints.                    (Plato: Graphite)
+        static let textSecondary = Color(hex: "#888888")
 
-        /// Tertiary text — section labels, timestamps, muted.
-        static let textTertiary = Color(hex: "#737370")       // gray-500
+        /// Tertiary text — section labels, timestamps, muted.       (Plato: Pebble)
+        static let textTertiary = Color(hex: "#A8A6A4")
 
-        /// Text on accent (amber) backgrounds — dark for contrast.
-        static let textOnAccent = Color(hex: "#0F0F10")       // gray-950
+        /// Text on accent (ink) backgrounds — paper for contrast.   (Plato: Quartz)
+        static let textOnAccent = Color(hex: "#E9E9E9")
 
         // ── Amber Scale (Brand Accent) ──────────────────────────────
         // Skilly's signature color. The cursor, CTAs, brand mark.
         // Rule: Amber is the ONLY chromatic accent in the app UI.
 
-        static let amber50  = Color(hex: "#FEFCE8")
-        static let amber100 = Color(hex: "#FEF3C7")
-        static let amber200 = Color(hex: "#FDE68A")
-        static let amber300 = Color(hex: "#FCD34D")
-        static let amber400 = Color(hex: "#FBBF24")
-        static let amber500 = Color(hex: "#F59E0B")
-        static let amber600 = Color(hex: "#D97706")
-        static let amber700 = Color(hex: "#B45309")
-        static let amber800 = Color(hex: "#92400E")
-        static let amber900 = Color(hex: "#78350F")
+        // Plato: monochrome "ink on paper" ramp (no chromatic accent). Names kept as `amberNNN`
+        // so every derived token + existing reference (incl. the cursor) adopts the ink tone.
+        static let amber50  = Color(hex: "#E9E9E9")
+        static let amber100 = Color(hex: "#DCDCDC")
+        static let amber200 = Color(hex: "#C2C0BE")
+        static let amber300 = Color(hex: "#3A3534")
+        static let amber400 = Color(hex: "#322D2D")
+        static let amber500 = Color(hex: "#262323")   // Onyx — primary ink / accent / cursor
+        static let amber600 = Color(hex: "#1E1A1A")
+        static let amber700 = Color(hex: "#181515")
+        static let amber800 = Color(hex: "#120F0F")
+        static let amber900 = Color(hex: "#0C0A0A")
 
         // ── Accent (derived from amber scale) ──────────────────────
 
@@ -100,7 +104,7 @@ enum DS {
         static let blue100 = Color(hex: "#dbeafe")
         static let blue200 = Color(hex: "#bfdbfe")
         static let blue300 = Color(hex: "#93c5fd")
-        static let blue400 = Color(hex: "#60a5fa")
+        static let blue400 = Color(hex: "#262323")  // Plato: ink (status dots) in paper mode
         static let blue500 = Color(hex: "#3b82f6")
         static let blue600 = Color(hex: "#2563eb")
         static let blue700 = Color(hex: "#1d4ed8")
@@ -110,20 +114,22 @@ enum DS {
 
         // ── Semantic Colors ──────────────────────────────────────────
 
+        // Plato: paper mode is monochrome EXCEPT destructive actions, which keep red as a
+        // deliberate danger signal (deepened for contrast on the light paper background).
         /// Error / destructive actions.
-        static let destructive = Color(hex: "#EF4444")        // red-500
-        static let destructiveHover = Color(hex: "#DC2626")
-        static let destructiveText = Color(hex: "#EF4444")
+        static let destructive = Color(hex: "#DC2626")
+        static let destructiveHover = Color(hex: "#B91C1C")
+        static let destructiveText = Color(hex: "#C42121")
 
         /// Success — active indicator, completion, granted status.
-        static let success = Color(hex: "#22C55E")            // green-500
+        static let success = Color(hex: "#262323")
 
         /// Warning — caution messages.
         static let warning = amber500
         static let warningText = amber300
 
-        /// Info — links on dark backgrounds where amber doesn't contrast.
-        static let info = Color(hex: "#3B82F6")               // blue-500
+        /// Info — collapses to ink in paper mode.
+        static let info = Color(hex: "#262323")
         static let codeText = amber400
 
         // ── Overlay Cursor ───────────────────────────────────────────
@@ -866,5 +872,51 @@ extension Color {
         let blue = nsColor.blueComponent + (1.0 - nsColor.blueComponent) * fraction
 
         return Color(red: red, green: green, blue: blue)
+    }
+}
+
+// MARK: - Plato — Paper texture
+
+/// A very subtle, deterministic paper grain for the "text on paper" feel. Draws faint
+/// specks via a fixed-seed pseudo-random sequence (no Math.random — stable across redraws),
+/// multiplied onto the light surface at low opacity. Purely decorative; ignores hit testing.
+struct PaperTexture: View {
+    var body: some View {
+        Canvas { context, size in
+            var seed: UInt64 = 0x9E3779B97F4A7C15
+            func nextUnit() -> Double {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return Double((seed >> 40) & 0xFFFFFF) / Double(0xFFFFFF)
+            }
+            let speckCount = min(2600, max(400, Int(size.width * size.height / 110)))
+            for _ in 0..<speckCount {
+                let x = nextUnit() * size.width
+                let y = nextUnit() * size.height
+                let diameter = 0.5 + nextUnit() * 0.9
+                let alpha = 0.012 + nextUnit() * 0.03
+                context.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: diameter, height: diameter)),
+                    with: .color(Color.black.opacity(alpha))
+                )
+            }
+        }
+        .blendMode(.multiply)
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Plato — Typography (Geist)
+
+extension DS {
+    enum Fonts {
+        /// Geist (sans) — titles, headers, body, labels.
+        static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+            Font.custom("Geist", size: size).weight(weight)
+        }
+
+        /// Geist Mono — the focus timer, numerals, interface detail.
+        static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+            Font.custom("Geist Mono", size: size).weight(weight)
+        }
     }
 }

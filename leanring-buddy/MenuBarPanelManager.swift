@@ -116,6 +116,26 @@ final class MenuBarPanelManager: NSObject {
     /// Rendered as a template image so macOS handles light/dark automatically.
     private func makeSkillyMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
+
+        // Plato: use the bust logo as the menu bar mark, rendered as a template silhouette
+        // (template = alpha-only, tinted by the menu bar appearance). Falls back to the drawn
+        // cursor arrow if the asset can't be loaded.
+        if let logo = NSImage(named: "PlatoLogo"), logo.size.height > 0 {
+            let aspect = logo.size.width / logo.size.height
+            let size = NSSize(width: (iconSize * aspect).rounded(), height: iconSize)
+            let bust = NSImage(size: size)
+            bust.lockFocus()
+            logo.draw(
+                in: NSRect(origin: .zero, size: size),
+                from: NSRect(origin: .zero, size: logo.size),
+                operation: .sourceOver,
+                fraction: 1.0
+            )
+            bust.unlockFocus()
+            bust.isTemplate = true
+            return bust
+        }
+
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()
 

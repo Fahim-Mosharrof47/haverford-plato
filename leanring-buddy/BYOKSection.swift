@@ -81,7 +81,7 @@ struct BYOKSection: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.04))
+                .fill(Color.black.opacity(0.04))
         )
     }
 
@@ -101,7 +101,7 @@ struct BYOKSection: View {
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
+                        .fill(Color.black.opacity(0.06))
                 )
 
                 Button(action: { isRevealed.toggle() }) {

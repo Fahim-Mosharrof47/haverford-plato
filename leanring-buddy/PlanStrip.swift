@@ -176,7 +176,7 @@ struct PlanStrip: View {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.white.opacity(0.08))
+                        .fill(Color.black.opacity(0.08))
                     RoundedRectangle(cornerRadius: 1.5)
                         .fill(progressColor)
                         .frame(width: geometry.size.width * max(0, min(1, progress)))
@@ -188,11 +188,11 @@ struct PlanStrip: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                .fill(Color.white.opacity(0.04))
+                .fill(Color.black.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                .stroke(Color.black.opacity(0.06), lineWidth: 0.5)
         )
     }
 

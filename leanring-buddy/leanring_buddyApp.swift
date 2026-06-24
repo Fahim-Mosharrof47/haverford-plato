@@ -7,6 +7,7 @@
 //  opens a floating panel with companion voice controls.
 //
 
+import CoreText
 import ServiceManagement
 import SwiftUI
 import Sparkle
@@ -37,6 +38,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private let skillManager = SkillManager.createDefault()
     let authManager = AuthManager.shared
 
+    /// Plato — registers the bundled Geist / Geist Mono fonts with the process so SwiftUI's
+    /// Font.custom("Geist" / "Geist Mono") resolves. Works whether the .ttf files are copied
+    /// flat into Resources or kept under a Fonts/ subdirectory.
+    private static func registerBundledFonts() {
+        for name in ["Geist-Variable", "GeistMono-Variable"] {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf")
+                ?? Bundle.main.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts") else {
+                continue
+            }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // MARK: - Skilly — Debug logging (stripped in release)
         #if DEBUG
@@ -45,6 +59,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         #endif
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
+
+        // Plato — register the bundled Geist fonts before any UI is built.
+        Self.registerBundledFonts()
 
         SkillyAnalytics.configure()
         SkillyAnalytics.trackAppOpened()

@@ -167,6 +167,13 @@ final class EntitlementManager: ObservableObject {
 
     /// Returns (allowed, reason). Call before starting any billable turn.
     func canStartTurn() -> (allowed: Bool, reason: BlockReason?) {
+        // MARK: - Plato — BYOK users pay OpenAI directly, so they bypass ALL entitlement,
+        // trial, and subscription gating. Checked first so neither the Rust policy path nor
+        // the Swift fallback below can block a user who supplied their own API key.
+        if AppSettings.shared.hasOwnAPIKey {
+            return (true, nil)
+        }
+
         // MARK: - Skilly — Prefer shared Rust policy when available.
         if let rustDecision = RustPolicyBridge.shared.canStartTurn(
             userID: AuthManager.shared.currentUser?.id,

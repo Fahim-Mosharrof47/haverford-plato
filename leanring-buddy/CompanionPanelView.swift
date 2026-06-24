@@ -15,9 +15,18 @@ struct CompanionPanelView: View {
     // MARK: - Skilly
     var skillManager: SkillManager?
     var authManager: AuthManager?
+    // MARK: - Plato — observe settings so the panel re-renders the moment a BYOK key is saved.
+    @ObservedObject var settings = AppSettings.shared
     @State private var emailInput: String = ""
     // MARK: - Skilly — Settings
     @State private var showSettings = false
+
+    // MARK: - Plato — BYOK users don't need a WorkOS account. Treat a saved OpenAI key as
+    // "signed in" everywhere the panel gates on sign-in, so they go straight to onboarding
+    // and then the main panel. (`?? true` preserves the original nil-authManager behavior.)
+    private var isEffectivelySignedIn: Bool {
+        (authManager?.isSignedIn ?? true) || settings.hasOwnAPIKey
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -37,7 +46,7 @@ struct CompanionPanelView: View {
                 settingsSection
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
-            } else if !(authManager?.isSignedIn ?? true) {
+            } else if !isEffectivelySignedIn {
                 permissionsCopySection
                     .padding(.top, 16)
                     .padding(.horizontal, 16)
@@ -83,7 +92,7 @@ struct CompanionPanelView: View {
         .frame(width: 300)
         .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.extraLarge, style: .continuous))
         .background(panelBackground)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     // MARK: - Push-to-talk Hint Strip (always visible)
@@ -129,11 +138,11 @@ struct CompanionPanelView: View {
             .frame(width: 18, height: 18)
             .background(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
+                    .fill(Color.black.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                    .stroke(Color.black.opacity(0.12), lineWidth: 0.5)
             )
     }
 
@@ -187,14 +196,14 @@ struct CompanionPanelView: View {
     private var panelHeader: some View {
         HStack {
             HStack(spacing: 6) {
-                // Skilly logo icon — sized to match the panel title (15px)
-                Image("SkillyCursor")
+                // Plato bust logo — the primary mark (replaces the cursor icon).
+                Image("PlatoLogo")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 20, height: 20)
 
                 Text("Plato")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(DS.Fonts.sans(16, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
 
                 // MARK: - Skilly — Version label
@@ -243,7 +252,7 @@ struct CompanionPanelView: View {
                     .frame(width: 20, height: 20)
                     .background(
                         Circle()
-                            .fill(Color.white.opacity(0.08))
+                            .fill(Color.black.opacity(0.08))
                     )
             }
             .buttonStyle(.plain)
@@ -260,12 +269,12 @@ struct CompanionPanelView: View {
 
     @ViewBuilder
     private var permissionsCopySection: some View {
-        if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted && (authManager?.isSignedIn ?? true) {
+        if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted && isEffectivelySignedIn {
             Text("Hold Control+Option to talk.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if companionManager.allPermissionsGranted && !(authManager?.isSignedIn ?? true) {
+        } else if companionManager.allPermissionsGranted && !isEffectivelySignedIn {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Sign in to get started.")
                     .font(.system(size: 12, weight: .medium))
@@ -743,7 +752,7 @@ struct CompanionPanelView: View {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Color.black.opacity(0.06))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
@@ -831,8 +840,13 @@ struct CompanionPanelView: View {
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: DS.CornerRadius.extraLarge, style: .continuous)
             .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+            .overlay(
+                // Subtle "text on paper" grain.
+                PaperTexture()
+                    .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.extraLarge, style: .continuous))
+            )
+            .shadow(color: Color.black.opacity(0.25), radius: 20, x: 0, y: 10)
+            .shadow(color: Color.black.opacity(0.15), radius: 4, x: 0, y: 2)
     }
 
     private var statusDotColor: Color {

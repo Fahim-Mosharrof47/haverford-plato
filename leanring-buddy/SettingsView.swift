@@ -54,7 +54,7 @@ struct SettingsView: View {
         }
         .frame(width: 300)
         .background(DS.Colors.background)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     // MARK: - Tab Bar
@@ -168,7 +168,7 @@ struct SettingsView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
+                            .fill(Color.black.opacity(0.06))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
@@ -227,7 +227,7 @@ struct SettingsView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.04))
+                .fill(Color.black.opacity(0.04))
         )
     }
 
@@ -365,6 +365,26 @@ struct SettingsView: View {
 
         divider
 
+        sectionHeader("RESEARCH")
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("OpenAlex API key (optional)", text: $settings.openAlexAPIKey)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textPrimary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                        .fill(Color.black.opacity(0.05))
+                )
+            Text("Optional. Paper search works without a key, but a free OpenAlex key (openalex.org/settings/api, ~30s) makes it reliable for heavy use. Falls back to Crossref automatically.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        divider
+
         if let skillManager {
             sectionHeader("SKILLS")
             toggleRow(
@@ -430,7 +450,7 @@ struct SettingsView: View {
             .padding(10)
             .background(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .fill(Color.white.opacity(0.04))
+                    .fill(Color.black.opacity(0.04))
             )
         }
         .buttonStyle(.plain)
@@ -457,7 +477,7 @@ struct SettingsView: View {
             .padding(.horizontal, 10)
             .background(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                    .fill(Color.white.opacity(0.03))
+                    .fill(Color.black.opacity(0.03))
             )
         }
         .buttonStyle(.plain)
@@ -475,7 +495,7 @@ struct SettingsView: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.08))
+            .fill(Color.black.opacity(0.08))
             .frame(height: 1)
             .padding(.vertical, 4)
     }
@@ -530,11 +550,11 @@ struct SettingsView: View {
             .padding(.vertical, 4)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.1))
+                    .fill(Color.black.opacity(0.1))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                    .stroke(Color.black.opacity(0.15), lineWidth: 0.5)
             )
     }
 }
