@@ -43,6 +43,7 @@
 				"skills/davinci-resolve-basics/SKILL.md",
 				"skills/figma-basics/SKILL.md",
 				"skills/premiere-pro-basics/SKILL.md",
+				"skills/plato-academic-tutor/SKILL.md",
 			);
 			target = 28F22CBE2F56440300A0FC59 /* leanring-buddy */;
 		};
@@ -463,7 +464,7 @@
 				INFOPLIST_KEY_AnthropicAPIKey = REPLACE_WITH_YOUR_KEY;
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
-				INFOPLIST_KEY_CFBundleDisplayName = Skilly;
+				INFOPLIST_KEY_CFBundleDisplayName = Plato;
 				INFOPLIST_KEY_CFBundleName = Skilly;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Skilly needs screen recording access to see your screen and help you learn.";
@@ -506,7 +507,7 @@
 				INFOPLIST_KEY_AnthropicAPIKey = REPLACE_WITH_YOUR_KEY;
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
-				INFOPLIST_KEY_CFBundleDisplayName = Skilly;
+				INFOPLIST_KEY_CFBundleDisplayName = Plato;
 				INFOPLIST_KEY_CFBundleName = Skilly;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Skilly needs screen recording access to see your screen and help you learn.";

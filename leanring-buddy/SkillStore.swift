@@ -225,21 +225,26 @@ final class SkillStore: Sendable {
         "after-effects-basics",
         "davinci-resolve-basics",
         "premiere-pro-basics",
+        // MARK: - Plato
+        "plato-academic-tutor",
     ]
 
-    /// Seeds bundled skills into ~/.skilly/skills/ on first launch.
-    /// Each bundled SKILL.md is located by its resource path in the app
-    /// bundle and copied into a new directory under the user's skills folder.
-    /// Existing skills are never overwritten.
+    /// Seeds bundled skills into ~/.skilly/skills/ on launch.
+    /// Each bundled SKILL.md is located by its resource path in the app bundle and copied
+    /// into a directory under the user's skills folder.
+    ///
+    /// MARK: - Plato — Version-aware seeding.
+    /// First install copies the bundled SKILL.md. On subsequent launches, an already-installed
+    /// copy is overwritten ONLY when the bundled copy declares a strictly-newer semantic
+    /// `version`, so persona/content edits reach users on app upgrade. If either version can't
+    /// be read, the installed copy is left untouched (conservative — never clobbers user edits).
     func seedBundledSkills() {
         let fileManager = FileManager.default
         let skillsDir = URL(fileURLWithPath: skillsDirectoryPath)
 
         for skillName in Self.bundledSkillNames {
             let destinationDir = skillsDir.appendingPathComponent(skillName)
-
-            // Don't overwrite if the user already has this skill installed
-            if fileManager.fileExists(atPath: destinationDir.path) { continue }
+            let destinationFile = destinationDir.appendingPathComponent("SKILL.md")
 
             // Look for the SKILL.md in the app bundle. Xcode copies resources
             // from leanring-buddy/skills/<name>/SKILL.md into the bundle.
@@ -276,9 +281,22 @@ final class SkillStore: Sendable {
                 continue
             }
 
+            let alreadyInstalled = fileManager.fileExists(atPath: destinationFile.path)
+            if alreadyInstalled {
+                // Only overwrite when the bundled copy is strictly newer.
+                guard Self.bundledVersionIsNewer(bundledURL: bundledSkillURL, installedFile: destinationFile) else {
+                    continue
+                }
+                #if DEBUG
+                print("[SkillStore] Updating bundled skill '\(skillName)' to a newer bundled version")
+                #endif
+            }
+
             do {
                 try fileManager.createDirectory(at: destinationDir, withIntermediateDirectories: true)
-                let destinationFile = destinationDir.appendingPathComponent("SKILL.md")
+                if alreadyInstalled {
+                    try? fileManager.removeItem(at: destinationFile)
+                }
                 try fileManager.copyItem(at: bundledSkillURL, to: destinationFile)
                 #if DEBUG
                 print("[SkillStore] Seeded bundled skill '\(skillName)'")
@@ -289,5 +307,42 @@ final class SkillStore: Sendable {
                 #endif
             }
         }
+    }
+
+    // MARK: - Plato — Version comparison helpers
+
+    /// Reads the `version` field from a SKILL.md file, or nil if unreadable/unparsable.
+    private static func skillVersion(atFile fileURL: URL) -> String? {
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8),
+              let metadata = try? SkillMetadata.parse(from: content) else {
+            return nil
+        }
+        return metadata.version
+    }
+
+    /// True when the bundled SKILL.md declares a strictly-newer semantic version than the
+    /// installed copy. Conservative: if either version can't be read, returns false.
+    private static func bundledVersionIsNewer(bundledURL: URL, installedFile: URL) -> Bool {
+        guard let bundledVersion = skillVersion(atFile: bundledURL),
+              let installedVersion = skillVersion(atFile: installedFile) else {
+            return false
+        }
+        return compareSemanticVersions(bundledVersion, installedVersion) == .orderedDescending
+    }
+
+    /// Compares dot-separated numeric version strings (e.g. "1.2.0" vs "1.10.0").
+    /// Missing or non-numeric components are treated as 0.
+    private static func compareSemanticVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsComponents = lhs.split(separator: ".").map { Int($0) ?? 0 }
+        let rhsComponents = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        let componentCount = max(lhsComponents.count, rhsComponents.count)
+        for index in 0..<componentCount {
+            let lhsValue = index < lhsComponents.count ? lhsComponents[index] : 0
+            let rhsValue = index < rhsComponents.count ? rhsComponents[index] : 0
+            if lhsValue != rhsValue {
+                return lhsValue < rhsValue ? .orderedAscending : .orderedDescending
+            }
+        }
+        return .orderedSame
     }
 }

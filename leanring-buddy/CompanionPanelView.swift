@@ -59,7 +59,7 @@ struct CompanionPanelView: View {
                     .padding(.bottom, 12)
             } else if let skillManager {
                 // Main content — single unified view, no navigation
-                PanelBodyView(skillManager: skillManager)
+                PanelBodyView(skillManager: skillManager, pomodoro: companionManager.pomodoro)
             }
 
             Divider()
@@ -193,7 +193,7 @@ struct CompanionPanelView: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 18, height: 18)
 
-                Text("Skilly")
+                Text("Plato")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
 
@@ -250,7 +250,7 @@ struct CompanionPanelView: View {
             .pointerCursor()
             // MARK: - Skilly — Accessibility
             .accessibilityLabel("Close panel")
-            .accessibilityHint("Dismisses the Skilly panel")
+            .accessibilityHint("Dismisses the Plato panel")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -270,13 +270,13 @@ struct CompanionPanelView: View {
                 Text("Sign in to get started.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
-                Text("Create an account to start learning with Skilly.")
+                Text("Create an account to start learning with Plato.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
-            Text("You're all set. Hit Start to meet Skilly.")
+            Text("You're all set. Hit Start to meet Plato.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -287,7 +287,7 @@ struct CompanionPanelView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("Some permissions were revoked. Grant all four below to keep using Skilly.")
+                Text("Some permissions were revoked. Grant all four below to keep using Plato.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -295,7 +295,7 @@ struct CompanionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Welcome to Skilly.")
+                Text("Welcome to Plato.")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
@@ -304,7 +304,7 @@ struct CompanionPanelView: View {
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Nothing runs in the background. Skilly will only take a screenshot when you press the hot key. So, you can give that permission in peace. If you are still sus, eh, I can't do much there champ.")
+                Text("Nothing runs in the background. Plato will only take a screenshot when you press the hot key. So, you can give that permission in peace. If you are still sus, eh, I can't do much there champ.")
                     .font(.system(size: 11))
                     .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
                     .fixedSize(horizontal: false, vertical: true)
@@ -374,7 +374,7 @@ struct CompanionPanelView: View {
         .pointerCursor()
         // MARK: - Skilly — Accessibility
         .accessibilityLabel("Start onboarding")
-        .accessibilityHint("Begins the Skilly introduction")
+        .accessibilityHint("Begins the Plato introduction")
     }
 
     // MARK: - Permissions
@@ -693,7 +693,7 @@ struct CompanionPanelView: View {
                     .foregroundColor(DS.Colors.textTertiary)
                     .frame(width: 16)
 
-                Text("Show Skilly")
+                Text("Show Plato")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
             }
@@ -712,8 +712,8 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
         // MARK: - Skilly — Accessibility
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Show Skilly cursor")
-        .accessibilityHint("Toggle to show or hide the Skilly companion cursor")
+        .accessibilityLabel("Show Plato cursor")
+        .accessibilityHint("Toggle to show or hide the Plato companion cursor")
         .accessibilityValue(companionManager.isSkillyCursorEnabled ? "On" : "Off")
     }
 
@@ -767,7 +767,7 @@ struct CompanionPanelView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "power")
                         .font(.system(size: 11, weight: .medium))
-                    Text("Quit Skilly")
+                    Text("Quit Plato")
                         .font(.system(size: 12, weight: .medium))
                 }
                 .foregroundColor(DS.Colors.textTertiary)
@@ -775,7 +775,7 @@ struct CompanionPanelView: View {
             .buttonStyle(.plain)
             .pointerCursor()
             // MARK: - Skilly — Accessibility
-            .accessibilityLabel("Quit Skilly")
+            .accessibilityLabel("Quit Plato")
             .accessibilityHint("Exits the application")
 
             if companionManager.hasCompletedOnboarding {
@@ -796,7 +796,7 @@ struct CompanionPanelView: View {
                 .pointerCursor()
                 // MARK: - Skilly — Accessibility
                 .accessibilityLabel("Replay intro")
-                .accessibilityHint("Replays the Skilly introduction")
+                .accessibilityHint("Replays the Plato introduction")
             }
 
             if authManager?.isSignedIn == true {

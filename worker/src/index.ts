@@ -14,6 +14,7 @@
  *   GET  /entitlement        → Returns authenticated user's entitlement
  *   POST /checkout/create    → Creates checkout for authenticated user
  *   GET  /portal             → Creates authenticated customer portal redirect
+ *   POST /papers             → Plato: Semantic Scholar paper search (auth-gated)
  */
 
 interface Env {
@@ -31,6 +32,9 @@ interface Env {
   POLAR_BETA_PRODUCT_ID: string;
   POLAR_BETA_PRICE_ID: string;
   POLAR_API_BASE: string; // "https://api.polar.sh" or "https://sandbox-api.polar.sh"
+  // Plato — optional Semantic Scholar Graph API key. Free tier works without it (lower
+  // rate limit); set it as a Worker secret before wider launch to raise the limit.
+  SEMANTIC_SCHOLAR_API_KEY?: string;
   SKILLY_ENTITLEMENTS: {
     get<T>(key: string, type: "json"): Promise<T | null>;
     put(key: string, value: string): Promise<void>;
@@ -88,6 +92,14 @@ export default {
         }
         if (url.pathname === "/auth/token") {
           return await handleAuthToken(request, env);
+        }
+        // Plato — Semantic Scholar paper search (search mode only for MVP).
+        if (url.pathname === "/papers") {
+          const authenticatedSession = await authenticateRequest(request, env);
+          if (!authenticatedSession) {
+            return unauthorizedResponse();
+          }
+          return await handlePapers(request, env);
         }
       }
 
@@ -663,6 +675,136 @@ async function handleOpenAIToken(env: Env, _authenticatedSession: AuthenticatedS
       },
     }
   );
+}
+
+// ─── Plato — Semantic Scholar paper search ─────────────────
+
+const SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search";
+const SEMANTIC_SCHOLAR_FIELDS = "title,year,authors,citationCount,url,externalIds,tldr";
+
+/** Always returns HTTP 200 with a tool-output contract the app forwards verbatim to the model:
+ *   { status: "ok" | "no_results" | "rate_limited" | "error", papers: [...], message?, disclaimer? }
+ * Provenance is strict: each paper carries exact title/authors/year/citationCount/url/externalIds and
+ * an explicit tldr:null when missing, so the model can cite only what is here and never fabricate.
+ */
+async function handlePapers(request: Request, env: Env): Promise<Response> {
+  const jsonHeaders = { "content-type": "application/json", "access-control-allow-origin": "*" };
+  const contract = (payload: Record<string, unknown>) =>
+    new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders });
+
+  let query = "";
+  let limit = 5;
+  try {
+    const body = (await request.json()) as { query?: unknown; limit?: unknown };
+    query = typeof body.query === "string" ? body.query.trim() : "";
+    const rawLimit = typeof body.limit === "number" ? body.limit : Number(body.limit);
+    if (Number.isFinite(rawLimit)) {
+      limit = Math.min(Math.max(Math.trunc(rawLimit), 1), 10);
+    }
+  } catch {
+    return contract({ status: "error", papers: [], message: "Invalid request body." });
+  }
+
+  if (!query) {
+    return contract({ status: "error", papers: [], message: "Empty query." });
+  }
+
+  const searchURL =
+    `${SEMANTIC_SCHOLAR_SEARCH_URL}?query=${encodeURIComponent(query)}` +
+    `&limit=${limit}&fields=${encodeURIComponent(SEMANTIC_SCHOLAR_FIELDS)}`;
+
+  const headers: Record<string, string> = {};
+  if (env.SEMANTIC_SCHOLAR_API_KEY) {
+    headers["x-api-key"] = env.SEMANTIC_SCHOLAR_API_KEY;
+  }
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  try {
+    let response = await fetch(searchURL, { headers });
+
+    // Free tier is rate-limited; retry once after Retry-After (or ~1s).
+    if (response.status === 429) {
+      const retryAfterSeconds = Number(response.headers.get("retry-after"));
+      const delayMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? Math.min(retryAfterSeconds, 3) * 1000
+        : 1000;
+      await sleep(delayMs);
+      response = await fetch(searchURL, { headers });
+    }
+
+    if (response.status === 429) {
+      return contract({
+        status: "rate_limited",
+        papers: [],
+        message: "The research service is rate-limited right now. Try again in a moment.",
+      });
+    }
+
+    if (!response.ok) {
+      console.error(`[/papers] Semantic Scholar error ${response.status}`);
+      return contract({
+        status: "error",
+        papers: [],
+        message: "Could not reach the research service.",
+      });
+    }
+
+    const data = (await response.json()) as { data?: SemanticScholarPaper[] };
+    const rawPapers = Array.isArray(data.data) ? data.data : [];
+    if (rawPapers.length === 0) {
+      return contract({
+        status: "no_results",
+        papers: [],
+        message: "No papers found for that query. Try rephrasing.",
+      });
+    }
+
+    const papers = rawPapers.map(mapSemanticScholarPaper);
+    return contract({
+      status: "ok",
+      papers,
+      disclaimer: "These are the only papers returned. Cite only these, by exact title, first author, and year.",
+    });
+  } catch (error) {
+    console.error(`[/papers] Unhandled error:`, error);
+    return contract({
+      status: "error",
+      papers: [],
+      message: "Could not reach the research service.",
+    });
+  }
+}
+
+interface SemanticScholarPaper {
+  paperId?: string;
+  title?: string;
+  year?: number | null;
+  citationCount?: number | null;
+  url?: string | null;
+  externalIds?: Record<string, unknown> | null;
+  authors?: Array<{ name?: string }> | null;
+  tldr?: { text?: string } | null;
+}
+
+/** Maps a raw Semantic Scholar paper to a strict provenance struct with explicit nulls. */
+function mapSemanticScholarPaper(paper: SemanticScholarPaper) {
+  const externalIds = paper.externalIds ?? {};
+  return {
+    paperId: paper.paperId ?? null,
+    title: paper.title ?? null,
+    year: typeof paper.year === "number" ? paper.year : null,
+    authors: Array.isArray(paper.authors)
+      ? paper.authors.map((a) => a?.name).filter((n): n is string => typeof n === "string").slice(0, 6)
+      : [],
+    citationCount: typeof paper.citationCount === "number" ? paper.citationCount : null,
+    url: typeof paper.url === "string" ? paper.url : null,
+    externalIds: {
+      DOI: typeof externalIds.DOI === "string" ? externalIds.DOI : null,
+      ArXiv: typeof externalIds.ArXiv === "string" ? externalIds.ArXiv : null,
+    },
+    tldr: paper.tldr && typeof paper.tldr.text === "string" ? paper.tldr.text : null,
+  };
 }
 
 interface CheckoutPayload {

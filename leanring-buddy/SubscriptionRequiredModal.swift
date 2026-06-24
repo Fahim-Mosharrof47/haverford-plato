@@ -23,7 +23,7 @@ struct SubscriptionRequiredModal: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
 
-            Text("An active subscription is needed to use Skilly. Start your free trial or subscribe today.")
+            Text("An active subscription is needed to use Plato. Start your free trial or subscribe today.")
                 .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textSecondary)
                 .lineSpacing(2)

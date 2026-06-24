@@ -153,6 +153,33 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(liveTutorAutoSleepMinutes, forKey: "liveTutorAutoSleepMinutes") }
     }
 
+    // MARK: - Plato — Academic companion
+
+    /// Master switch for Plato's always-active academic persona. When true, the bundled
+    /// `plato-academic-tutor` skill stays active across every foreground app. When false,
+    /// the persona is turned off entirely (the real off-switch for the global skill).
+    /// Drives `SkillManager.activateGlobalSkillOrDeactivate()`.
+    @Published var academicModeEnabled: Bool {
+        didSet { UserDefaults.standard.set(academicModeEnabled, forKey: "academicModeEnabled") }
+    }
+
+    // MARK: - Plato — Pomodoro focus timer
+
+    /// Length of a focus (work) block in minutes. Pickable: 15 / 25 / 45 / 60.
+    @Published var pomodoroWorkMinutes: Int {
+        didSet { UserDefaults.standard.set(pomodoroWorkMinutes, forKey: "pomodoroWorkMinutes") }
+    }
+
+    /// Length of a break in minutes. Pickable: 5 / 10 / 15.
+    @Published var pomodoroBreakMinutes: Int {
+        didSet { UserDefaults.standard.set(pomodoroBreakMinutes, forKey: "pomodoroBreakMinutes") }
+    }
+
+    /// Number of focus blocks in a set (the "N" in "3 of N").
+    @Published var pomodoroSessionsPerBlock: Int {
+        didSet { UserDefaults.standard.set(pomodoroSessionsPerBlock, forKey: "pomodoroSessionsPerBlock") }
+    }
+
     // MARK: - Init
 
     private init() {
@@ -207,6 +234,22 @@ final class AppSettings: ObservableObject {
         self.liveTutorAutoSleepMinutes = UserDefaults.standard.object(forKey: "liveTutorAutoSleepMinutes") == nil
             ? 5  // Default: auto-sleep after 5 minutes of silence
             : UserDefaults.standard.integer(forKey: "liveTutorAutoSleepMinutes")
+
+        // Plato — Academic mode defaults ON so the persona is present out of the box.
+        self.academicModeEnabled = UserDefaults.standard.object(forKey: "academicModeEnabled") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "academicModeEnabled")
+
+        // Plato — Pomodoro defaults: 25-minute focus, 5-minute break, 4 blocks per set.
+        self.pomodoroWorkMinutes = UserDefaults.standard.object(forKey: "pomodoroWorkMinutes") == nil
+            ? 25
+            : UserDefaults.standard.integer(forKey: "pomodoroWorkMinutes")
+        self.pomodoroBreakMinutes = UserDefaults.standard.object(forKey: "pomodoroBreakMinutes") == nil
+            ? 5
+            : UserDefaults.standard.integer(forKey: "pomodoroBreakMinutes")
+        self.pomodoroSessionsPerBlock = UserDefaults.standard.object(forKey: "pomodoroSessionsPerBlock") == nil
+            ? 4
+            : UserDefaults.standard.integer(forKey: "pomodoroSessionsPerBlock")
 
         // Pipeline is always OpenAI Realtime
     }

@@ -304,7 +304,7 @@ struct SettingsView: View {
             keyBadge(settings.cancelKeyDisplayName)
         }
         if settings.voiceInputMode == "liveTutor" {
-            Text("In Live Tutor mode, just start talking. Skilly listens automatically.")
+            Text("In Live Tutor mode, just start talking. Plato listens automatically.")
                 .font(.system(size: 10))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -315,6 +315,56 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var generalContent: some View {
+        // MARK: - Plato — Academic mode + focus timer
+        sectionHeader("ACADEMIC")
+        toggleRow(
+            title: "Academic mode",
+            subtitle: "Keep Plato active across every app. Turn off to disable the companion.",
+            isOn: Binding(
+                get: { settings.academicModeEnabled },
+                set: { newValue in
+                    if let skillManager {
+                        skillManager.setAcademicModeEnabled(newValue)
+                    } else {
+                        settings.academicModeEnabled = newValue
+                    }
+                }
+            )
+        )
+
+        divider
+
+        sectionHeader("FOCUS TIMER")
+        settingsRow("Focus length") {
+            settingsPicker(
+                selection: Binding(
+                    get: { String(settings.pomodoroWorkMinutes) },
+                    set: { settings.pomodoroWorkMinutes = Int($0) ?? 25 }
+                ),
+                options: [("15", "15 min"), ("25", "25 min"), ("45", "45 min"), ("60", "60 min")]
+            )
+        }
+        settingsRow("Break length") {
+            settingsPicker(
+                selection: Binding(
+                    get: { String(settings.pomodoroBreakMinutes) },
+                    set: { settings.pomodoroBreakMinutes = Int($0) ?? 5 }
+                ),
+                options: [("5", "5 min"), ("10", "10 min"), ("15", "15 min")]
+            )
+        }
+        settingsRow("Blocks per set") {
+            settingsPicker(
+                selection: Binding(
+                    get: { String(settings.pomodoroSessionsPerBlock) },
+                    set: { settings.pomodoroSessionsPerBlock = Int($0) ?? 4 }
+                ),
+                options: [("2", "2"), ("3", "3"), ("4", "4"), ("5", "5"), ("6", "6")]
+            )
+        }
+
+        divider
+
         if let skillManager {
             sectionHeader("SKILLS")
             toggleRow(
@@ -369,7 +419,7 @@ struct SettingsView: View {
             HStack {
                 Image(systemName: "power")
                     .font(.system(size: 11))
-                Text("Quit Skilly")
+                Text("Quit Plato")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 Text("⌘Q")

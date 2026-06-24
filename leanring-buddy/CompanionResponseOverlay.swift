@@ -225,7 +225,7 @@ private struct CompanionResponseOverlayView: View {
                 )
                 // MARK: - Skilly — Accessibility
                 .accessibilityElement(children: .contain)
-                .accessibilityLabel("Skilly response")
+                .accessibilityLabel("Plato response")
                 .accessibilityValue(viewModel.streamingResponseText.isEmpty ? "Thinking" : viewModel.streamingResponseText)
         }
     }

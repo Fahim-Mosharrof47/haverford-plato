@@ -74,6 +74,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             authManager: authManager
         )
         companionManager.start()
+        // Plato — load the last session's recap so Plato can open with a re-entry briefing.
+        companionManager.loadLastSessionForBriefing()
         if authManager.isAuthenticated {
             Task { await EntitlementManager.shared.refresh() }
         }
@@ -87,6 +89,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Plato — persist the session snapshot for next launch's re-entry briefing.
+        companionManager.persistSession()
         companionManager.stop()
     }
 

@@ -140,6 +140,12 @@ final class SkillManager: ObservableObject {
                 // become active without requiring an app switch.
                 autoDetectAndActivateSkill(frontmostAppBundleId: frontmostAppBundleId)
             }
+
+            // Plato bootstrap: if nothing got activated (first launch with no persisted
+            // active skill, or no app match / no frontmost app), fall back to the global persona.
+            if activeSkill == nil {
+                activateGlobalSkillOrDeactivate()
+            }
         } catch {
             // MARK: - Skilly — Debug logging (stripped in release)
             #if DEBUG
@@ -375,6 +381,43 @@ final class SkillManager: ObservableObject {
         return (true, nil)
     }
 
+    // MARK: - Plato — Global (always-active) skill
+
+    /// The installed skill, if any, requesting always-active behavior. Such a skill stays
+    /// active regardless of the frontmost app. Plato ships exactly one (the academic
+    /// companion); if a user imports more, the first loaded wins.
+    var defaultGlobalSkill: SkillDefinition? {
+        installedSkills.first { $0.metadata.isAlwaysActive }
+    }
+
+    /// Fallback used by both deactivation sites: instead of clearing the persona when no
+    /// app-specific skill matches, activate the always-active global skill. Honors the
+    /// Academic-mode toggle — when the user has turned Plato off (or no global skill is
+    /// installed), this deactivates exactly as the original Skilly code did.
+    private func activateGlobalSkillOrDeactivate() {
+        guard AppSettings.shared.academicModeEnabled,
+              let globalSkill = defaultGlobalSkill else {
+            deactivateCurrentSkill()
+            return
+        }
+        if activeSkill?.metadata.id != globalSkill.metadata.id {
+            activateSkill(globalSkill, isManualSelection: false)
+        }
+    }
+
+    /// Toggles Plato's academic persona on/off (the real off-switch for the global skill).
+    /// ON re-activates the global persona; OFF deactivates it only when it is the active
+    /// skill, leaving any app-specific skill untouched.
+    func setAcademicModeEnabled(_ enabled: Bool) {
+        AppSettings.shared.academicModeEnabled = enabled
+        if enabled {
+            activateGlobalSkillOrDeactivate()
+        } else if let globalSkill = defaultGlobalSkill,
+                  activeSkill?.metadata.id == globalSkill.metadata.id {
+            deactivateSkill()
+        }
+    }
+
     // MARK: - Skilly
 
     func autoDetectAndActivateSkill(frontmostAppBundleId: String) {
@@ -395,7 +438,8 @@ final class SkillManager: ObservableObject {
                 activateSkill(matchingSkill, isManualSelection: false)
             }
         } else {
-            deactivateCurrentSkill()
+            // Plato: fall back to the always-active global persona instead of clearing it.
+            activateGlobalSkillOrDeactivate()
         }
     }
 
@@ -553,7 +597,9 @@ final class SkillManager: ObservableObject {
             if hasManuallySelectedSkill {
                 scheduleManualSelectionResetTimer()
             } else {
-                deactivateCurrentSkill()
+                // Plato: an empty/nil frontmost app falls back to the global persona,
+                // not deactivation, so Plato stays present on an empty desktop.
+                activateGlobalSkillOrDeactivate()
             }
             return
         }

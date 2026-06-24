@@ -147,7 +147,7 @@ struct BYOKSection: View {
             HStack(spacing: 4) {
                 Image(systemName: "checkmark")
                     .font(.system(size: 9))
-                Text("Key verified — Skilly will use it for all Realtime sessions.")
+                Text("Key verified — Plato will use it for all Realtime sessions.")
                     .font(.system(size: 10))
             }
             .foregroundColor(DS.Colors.accent)

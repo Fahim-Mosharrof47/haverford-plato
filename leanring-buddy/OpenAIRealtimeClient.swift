@@ -394,6 +394,31 @@ final class OpenAIRealtimeClient: ObservableObject {
             ]
         ]
 
+        // MARK: - Plato — search_scholar tool
+        // A TRUE async research tool (unlike the synchronous point_at_element).
+        // The model calls this when the user asks about research / papers / citations;
+        // CompanionManager performs the network lookup against the Worker /papers route
+        // and returns the real result via sendToolResultAndContinue (NOT a {"ok":true} stub).
+        let searchScholarTool: [String: Any] = [
+            "type": "function",
+            "name": "search_scholar",
+            "description": "Search academic literature (Semantic Scholar) for REAL papers on a topic. Returns actual papers with exact titles, authors, year, citation count, and URL. Call this whenever the user asks about research, asks who studied/proved/wrote something, wants citations, or asks what to read. Do not answer about specific papers from memory — call this and cite only what it returns. Say a brief 'let me look that up' before calling, since results take a moment.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "query": [
+                        "type": "string",
+                        "description": "Natural-language search query, e.g. 'CBT vs medication adolescent anxiety randomized'."
+                    ],
+                    "limit": [
+                        "type": "integer",
+                        "description": "Maximum number of papers to return, between 1 and 10. Defaults to 5 if omitted."
+                    ]
+                ],
+                "required": ["query"]
+            ]
+        ]
+
         // MARK: - Skilly — GA Realtime session.update shape (2026-05-30)
         // The Realtime Beta API used flat fields (modalities, input_audio_format,
         // input_audio_transcription, turn_detection, voice) plus an implicit
@@ -434,7 +459,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool],
+            "tools": [pointAtElementTool, searchScholarTool],
             "tool_choice": "auto",
         ]
 
@@ -609,6 +634,46 @@ final class OpenAIRealtimeClient: ObservableObject {
             try? await sendEvent(responseEvent)
             #if DEBUG
             print("🗣️ OpenAI Realtime: requested forced spoken response")
+            #endif
+        }
+    }
+
+    // MARK: - Plato — Async research-tool continuation
+
+    /// Send a `function_call_output` carrying the REAL tool result, then immediately request
+    /// a new response so the model reasons over and speaks that result. This is the resume
+    /// primitive for async research tools (e.g. search_scholar).
+    ///
+    /// Distinct from `requestForcedSpokenResponse`, which forces `tool_choice: none`: here we
+    /// keep `tool_choice: "auto"` so the model can chain follow-on tool calls (e.g. a later
+    /// recommendation or BibTeX lookup) when reasoning over the returned papers.
+    func sendToolResultAndContinue(callId: String, output: String) {
+        guard isConnected else { return }
+
+        let outputEvent: [String: Any] = [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "function_call_output",
+                "call_id": callId,
+                "output": output
+            ]
+        ]
+
+        // GA Realtime shape (see commitAudioAndRespond): use output_modalities; audio is default.
+        let responseEvent: [String: Any] = [
+            "type": "response.create",
+            "response": [
+                "output_modalities": ["audio"],
+                "tool_choice": "auto"
+            ]
+        ]
+
+        Task {
+            // Order matters: the output item must exist before the new response is requested.
+            try? await sendEvent(outputEvent)
+            try? await sendEvent(responseEvent)
+            #if DEBUG
+            print("🔎 OpenAI Realtime: sent research tool result + continuation for \(callId)")
             #endif
         }
     }

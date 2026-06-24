@@ -17,6 +17,8 @@ import UniformTypeIdentifiers
 
 struct PanelBodyView: View {
     @ObservedObject var skillManager: SkillManager
+    // MARK: - Plato — focus timer (owned by CompanionManager, observed here)
+    @ObservedObject var pomodoro: PomodoroTimer
 
     @State private var hoveredSkillId: String?
     @State private var pendingDeletion: PendingDeletion?
@@ -62,6 +64,7 @@ struct PanelBodyView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             PlanStrip()
+            pomodoroSection
             activeNowSection
             installedSection
         }
@@ -85,6 +88,120 @@ struct PanelBodyView: View {
             if case .success(let urls) = result, let url = urls.first {
                 try? skillManager.importSkillFromDirectory(url)
             }
+        }
+    }
+
+    // MARK: - Plato — Pomodoro Focus Timer Section
+
+    @ViewBuilder
+    private var pomodoroSection: some View {
+        let isWork = pomodoro.phase == .work
+        let accent = isWork ? DS.Colors.accent : DS.Colors.textTertiary
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("FOCUS")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(DS.Colors.accentText)
+                    .tracking(0.8)
+                Spacer()
+                Text(pomodoroPhaseLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(accent)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(pomodoro.displayTime)
+                    .font(.system(size: 34, weight: .medium, design: .monospaced))
+                    .foregroundColor(pomodoro.phase == .idle ? DS.Colors.textTertiary : DS.Colors.textPrimary)
+                    .tracking(1)
+
+                Spacer()
+
+                if pomodoro.phase != .idle {
+                    Text("\(pomodoro.currentSession) of \(pomodoro.sessionsTotal)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+
+            // Focus topic field — editable when idle or working.
+            if pomodoro.phase != .breakTime {
+                TextField("What are you working on?", text: $pomodoro.focusTopic)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                            .fill(Color.white.opacity(0.05))
+                    )
+            }
+
+            HStack(spacing: 8) {
+                Button(action: { pomodoro.isRunning ? pomodoro.pause() : pomodoro.start() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(pomodoroPrimaryButtonLabel)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(DS.Colors.accentText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .fill(DS.Colors.accent.opacity(isWork ? 0.22 : 0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .stroke(DS.Colors.accent.opacity(0.3), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+
+                Button(action: { pomodoro.reset() }) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                .fill(Color.white.opacity(0.05))
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .disabled(pomodoro.phase == .idle)
+                .opacity(pomodoro.phase == .idle ? 0.4 : 1)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(isWork ? DS.Colors.accentSubtle : Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(isWork ? DS.Colors.accent.opacity(0.25) : Color.white.opacity(0.08), lineWidth: 0.5)
+        )
+    }
+
+    private var pomodoroPhaseLabel: String {
+        switch pomodoro.phase {
+        case .idle: return "READY"
+        case .work: return "FOCUS"
+        case .breakTime: return "BREAK"
+        }
+    }
+
+    private var pomodoroPrimaryButtonLabel: String {
+        if pomodoro.isRunning { return "Pause" }
+        switch pomodoro.phase {
+        case .idle: return "Start focus"
+        default: return "Resume"
         }
     }
 

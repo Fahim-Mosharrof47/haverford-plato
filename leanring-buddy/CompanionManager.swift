@@ -82,11 +82,15 @@ final class CompanionManager: ObservableObject {
     /// Returns the skill-composed system prompt if a skill is active,
     /// otherwise falls back to the base Skilly prompt.
     private var composedSystemPrompt: String {
+        // Plato: dynamic per-turn context (scholar contract, focus topic, re-entry briefing)
+        // is appended to the base prompt here so it flows through BOTH the skill-composed path
+        // and the fallback — and stays out of the Rust-backed SkillPromptComposer.
+        let base = modeAwareBasePrompt + "\n\n" + platoSessionContext
         if let skillManager,
-           let composed = skillManager.composedSystemPrompt(basePrompt: modeAwareBasePrompt) {
+           let composed = skillManager.composedSystemPrompt(basePrompt: base) {
             return composed
         }
-        return modeAwareBasePrompt
+        return base
     }
 
     // MARK: - Skilly Core
@@ -133,6 +137,73 @@ final class CompanionManager: ObservableObject {
     private var didReceiveAnyAudioChunkForCurrentTurn = false
     private var pendingToolCallIdForCurrentTurn: String?
     private var isAwaitingForcedSpokenFollowUp = false
+
+    // MARK: - Plato — In-flight async research tool calls (search_scholar).
+    // Deliberately NOT reset on turn boundaries (push-to-talk start / VAD speech_started):
+    // a multi-second network fetch can outlive the turn, and we must still deliver the
+    // function_call_output for its call_id. Capped at one in-flight call for the MVP.
+    private var pendingResearchCallIds = Set<String>()
+
+    // MARK: - Plato — Dynamic session context (injected into the system prompt)
+    /// The current focus-block topic (set by the Pomodoro timer). Included in the prompt so the
+    /// persona's distraction-detection has context. Nil when no focus block is active.
+    @Published var currentFocusTopic: String?
+    /// One-shot last-session summary for the re-entry briefing (set on launch by
+    /// SessionStateManager). Surfaced in the prompt until the session has re-entered.
+    var pendingSessionBriefing: String?
+
+    // MARK: - Plato — Pomodoro focus timer
+    /// Lazily created so its callbacks can capture a fully-initialized self. The panel UI
+    /// observes this object directly. Transitions drive the focus topic + spoken announcements.
+    lazy var pomodoro: PomodoroTimer = {
+        let timer = PomodoroTimer()
+        timer.onFocusTopicChange = { [weak self] topic in
+            self?.currentFocusTopic = topic
+            self?.sessionState.recordFocusTopic(topic)
+        }
+        timer.onWorkStart = { [weak self] session, total, topic in
+            let focusClause = topic.isEmpty
+                ? " Briefly tell the user the focus block has started and you're here if they need you."
+                : " The user is focusing on: \"\(topic)\". Briefly acknowledge the focus block has started and that you'll help keep them on track."
+            self?.speakProactiveAnnouncement(
+                "A focus block just started (block \(session) of \(total))." + focusClause + " Keep it to one short sentence."
+            )
+        }
+        timer.onWorkEnd = { [weak self] _, _ in
+            self?.sessionState.recordPomodoroCompleted()
+            self?.speakProactiveAnnouncement(
+                "The focus block just ended — it's break time. In one or two short sentences, congratulate the user and give a brief recap of what they worked on this block based on your recent conversation, then suggest a short break."
+            )
+        }
+        timer.onBreakEnd = { [weak self] in
+            self?.speakProactiveAnnouncement(
+                "The break just ended. In one short sentence, gently nudge the user back to work."
+            )
+        }
+        return timer
+    }()
+
+    /// Proactive spoken announcement for timer transitions. Best-effort: the underlying
+    /// requestForcedSpokenResponse no-ops unless the realtime session is already connected
+    /// (e.g. Live Tutor mode or an in-progress session). The panel UI still reflects the
+    /// transition when no session is live.
+    func speakProactiveAnnouncement(_ instruction: String) {
+        openAIRealtimeClient.requestForcedSpokenResponse(instruction: instruction)
+    }
+
+    // MARK: - Plato — Local session state + re-entry briefing
+    let sessionState = SessionStateManager()
+
+    /// Called at launch: loads the previous session's recap so the persona can open with a
+    /// re-entry briefing. Surfaced via platoSessionContext until the session has re-entered.
+    func loadLastSessionForBriefing() {
+        pendingSessionBriefing = sessionState.loadLastSummary()
+    }
+
+    /// Called at quit: persists the current session snapshot for next launch's briefing.
+    func persistSession() {
+        sessionState.persistCurrentSession()
+    }
     private var rustRealtimeEventLog: [RustRealtimeBridge.RealtimeEventPayload] = []
     private var currentRustRealtimeTurnID: String?
     private var latestRustRealtimePhaseName: String = "idle"
@@ -742,7 +813,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Skilly — Base prompt for realtime assistant responses
     private static let realtimeCompanionBasePrompt = """
-    you're skilly, a friendly always-on teaching companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're Plato, an always-on academic research companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
@@ -797,6 +868,127 @@ final class CompanionManager: ObservableObject {
             )
         }
         return Self.realtimeCompanionBasePrompt
+    }
+
+    // MARK: - Plato — Dynamic context + search_scholar tool
+
+    /// Static instruction describing the search_scholar tool contract and citation discipline.
+    /// Reinforces the persona SKILL.md at the operational level (the model sees both).
+    private static let platoScholarInstruction = """
+    RESEARCH & CITATIONS: You have a search_scholar tool that returns REAL academic papers. \
+    When the user asks about research, asks who studied or proved something, wants citations, \
+    or asks what to read, call search_scholar — do not answer about specific papers from memory. \
+    Cite ONLY papers the tool returns, each by its exact title, first author (et al. if more), and year. \
+    Never invent or recall a title, author, year, journal, or DOI. If a returned paper has no summary, \
+    say so rather than guessing. If the tool reports no results, an error, or a rate limit, tell the user \
+    you could not find or reach the literature and suggest rephrasing — never fabricate a source.
+    """
+
+    /// Dynamic per-turn context appended to the base prompt: the scholar contract plus, when
+    /// present, the active focus topic and the last-session re-entry briefing. Injected at the
+    /// CompanionManager level (not the Rust-backed composer) to keep Plato out of the Rust layer.
+    private var platoSessionContext: String {
+        var sections: [String] = [Self.platoScholarInstruction]
+
+        if let focusTopic = currentFocusTopic?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !focusTopic.isEmpty {
+            sections.append(
+                "ACTIVE FOCUS BLOCK: The user is in a focus session working on: \"\(focusTopic)\". "
+                + "If the screen clearly shows something unrelated to this during the block, nudge them "
+                + "back once, lightly — then drop it."
+            )
+        }
+
+        if let briefing = pendingSessionBriefing?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !briefing.isEmpty {
+            sections.append(
+                "LAST SESSION (use for a one- or two-sentence re-entry briefing when the session opens): "
+                + briefing
+            )
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// Handle a `search_scholar` function call: parse args, fetch from the Worker `/papers`
+    /// route, and return the real result to the model via `sendToolResultAndContinue`. The
+    /// network work runs off the current turn (the turn may end before the fetch resolves);
+    /// `pendingResearchCallIds` survives turn resets so the correct call_id is always closed.
+    private func handleScholarToolCall(argumentsJSON: String, callId: String) {
+        // Parse arguments (query required; limit optional, clamped 1...10, default 5).
+        var query = ""
+        var limit = 5
+        if let data = argumentsJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            query = (object["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let rawLimit = object["limit"] as? Int {
+                limit = rawLimit
+            } else if let rawLimit = object["limit"] as? Double {
+                limit = Int(rawLimit)
+            } else if let rawLimit = object["limit"] as? String, let parsed = Int(rawLimit) {
+                limit = parsed
+            }
+        }
+        limit = min(max(limit, 1), 10)
+
+        guard !query.isEmpty else {
+            openAIRealtimeClient.sendToolResultAndContinue(
+                callId: callId,
+                output: #"{"status":"error","papers":[],"message":"Empty query."}"#
+            )
+            return
+        }
+
+        // Cap to a single in-flight research call for the MVP.
+        guard pendingResearchCallIds.isEmpty else {
+            openAIRealtimeClient.sendToolResultAndContinue(
+                callId: callId,
+                output: #"{"status":"error","papers":[],"message":"A search is already in progress. Ask again in a moment."}"#
+            )
+            return
+        }
+
+        pendingResearchCallIds.insert(callId)
+        sessionState.recordPaperSearch()
+        Task { @MainActor in
+            let resultJSON = await fetchScholarPapers(query: query, limit: limit)
+            pendingResearchCallIds.remove(callId)
+            openAIRealtimeClient.sendToolResultAndContinue(callId: callId, output: resultJSON)
+        }
+    }
+
+    /// Fetch papers from the Worker `/papers` route. ALWAYS returns a JSON string suitable for
+    /// `function_call_output` — never throws, never returns empty — so the model is never left
+    /// hanging. On any failure it returns an honest-failure contract the persona knows to relay.
+    private func fetchScholarPapers(query: String, limit: Int) async -> String {
+        let errorOutput = #"{"status":"error","papers":[],"message":"Could not reach the research service."}"#
+
+        guard let url = URL(string: "\(AppSettings.shared.workerBaseURL)/papers") else {
+            return errorOutput
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard AuthManager.shared.applyWorkerSessionAuthorization(to: &request) else {
+            return #"{"status":"error","papers":[],"message":"You need to be signed in to search papers."}"#
+        }
+
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query, "limit": limit])
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200,
+                  let bodyString = String(data: data, encoding: .utf8),
+                  !bodyString.isEmpty else {
+                return errorOutput
+            }
+            // The Worker already formats the tool-output contract; pass it through verbatim.
+            return bodyString
+        } catch {
+            return errorOutput
+        }
     }
 
     /// If the cursor is in transient mode (user toggled "Show Skilly" off),
@@ -1445,9 +1637,15 @@ final class CompanionManager: ObservableObject {
                     with: "",
                     options: .regularExpression
                 )
+                let trimmedAssistantResponse = cleanedAssistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
                 skillManager?.didReceiveInteraction(
                     transcript: currentTurnUserTranscript,
-                    assistantResponse: cleanedAssistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+                    assistantResponse: trimmedAssistantResponse
+                )
+                // Plato: keep a trimmed transcript for the session recap / re-entry briefing.
+                sessionState.recordTurn(
+                    userTranscript: currentTurnUserTranscript,
+                    assistantResponse: trimmedAssistantResponse
                 )
             }
             self.currentTurnUserTranscript = nil
@@ -1465,10 +1663,25 @@ final class CompanionManager: ObservableObject {
             // message. We route it straight to the pointing animation without
             // touching the audio/text stream. We also save the call_id so
             // we can close the call with function_call_output in .responseDone.
-            if name == "point_at_element" {
+            // MARK: - Plato — General tool dispatch.
+            // point_at_element keeps its synchronous path (closed with {"ok":true} in the
+            // .responseDone recovery branch). search_scholar routes to an async network
+            // handler. Unknown tools are closed immediately so no function_call is orphaned.
+            switch name {
+            case "point_at_element":
                 applyPointDirectiveFromToolCall(argumentsJSON: argumentsJSON)
                 didReceivePointToolCallForCurrentTurn = true
                 pendingToolCallIdForCurrentTurn = callId
+            case "search_scholar":
+                handleScholarToolCall(argumentsJSON: argumentsJSON, callId: callId)
+            default:
+                #if DEBUG
+                print("[CompanionManager] Unknown tool call '\(name)' — closing with error output")
+                #endif
+                openAIRealtimeClient.sendToolResultAndContinue(
+                    callId: callId,
+                    output: #"{"status":"error","message":"Unknown tool."}"#
+                )
             }
 
         case .speechStarted:

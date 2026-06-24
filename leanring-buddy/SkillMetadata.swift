@@ -104,6 +104,14 @@ struct SkillMetadata: Codable, Sendable {
     /// How aggressively the cursor overlay should point at UI elements during this skill.
     let pointingMode: PointingMode
 
+    // MARK: Activation Scope
+
+    /// When true, this skill stays active across every foreground app instead of
+    /// auto-activating only when a matching application is frontmost. Used for global
+    /// personas (e.g. Plato's academic companion) that are not tied to one app.
+    /// Parsed from `always_active: true` (or `scope: global`) in the frontmatter; defaults to false.
+    let isAlwaysActive: Bool
+
     // MARK: Classification
 
     /// Broad category for this skill, e.g. "debugging".
@@ -354,6 +362,18 @@ struct SkillMetadata: Codable, Sendable {
             parsedPointingMode = .always
         }
 
+        // MARK: Always-active (global) skill flag — drives app-independent activation
+        let parsedIsAlwaysActive: Bool = {
+            if let rawAlwaysActive = firstNonEmptyValue(for: ["always_active", "alwaysactive", "always-active"]) {
+                let normalized = rawAlwaysActive.lowercased()
+                return normalized == "true" || normalized == "yes" || normalized == "1"
+            }
+            if let rawScope = firstNonEmptyValue(for: ["scope"]) {
+                return rawScope.lowercased() == "global"
+            }
+            return false
+        }()
+
         // MARK: Optional fields
         let parsedMinAppVersion = keyValueMap["min_app_version"].flatMap { $0.isEmpty ? nil : $0 }
         let parsedRecommendedModel = firstNonEmptyValue(for: ["recommended_model", "model"])
@@ -395,6 +415,7 @@ struct SkillMetadata: Codable, Sendable {
             platform: parsedPlatform,
             recommendedModel: parsedRecommendedModel,
             pointingMode: parsedPointingMode,
+            isAlwaysActive: parsedIsAlwaysActive,
             category: parsedCategory,
             tags: parsedTags,
             difficulty: parsedDifficulty,
