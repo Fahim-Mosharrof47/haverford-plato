@@ -438,6 +438,31 @@ struct SettingsView: View {
                 .foregroundColor(DS.Colors.textTertiary)
         }
 
+        // MARK: - Plato — Demo reset: rewind onboarding so the first-run
+        // experience (Start button → welcome → intro video) can be shown
+        // again. One tap; does not sign out or delete skills/progress.
+        Button(action: { companionManager?.resetOnboardingForDemo() }) {
+            HStack {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 11))
+                Text("Reset onboarding")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Text("for demos")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .foregroundColor(DS.Colors.textSecondary)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .fill(Color.black.opacity(0.04))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .padding(.top, 4)
+
         Button(action: { NSApp.terminate(nil) }) {
             HStack {
                 Image(systemName: "power")

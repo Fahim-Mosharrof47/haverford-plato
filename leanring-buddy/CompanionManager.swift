@@ -450,6 +450,34 @@ final class CompanionManager: ObservableObject {
         isOverlayVisible = true
     }
 
+    // MARK: - Plato — Demo reset
+    /// Rewinds Plato to its first-run state so the onboarding can be demoed
+    /// again. Clears the onboarding/email flags the panel gates on, tears down
+    /// the cursor overlay so the welcome animation + intro video replay fresh,
+    /// and nudges observers so the panel reverts to showing the "Start" button.
+    /// Intentionally does NOT sign the user out or touch permissions/skills —
+    /// it only rewinds onboarding so clicking "Start" replays the full intro.
+    func resetOnboardingForDemo() {
+        // Rewind the first-run flags the panel gates on.
+        hasCompletedOnboarding = false
+        hasSubmittedEmail = false
+        UserDefaults.standard.set(false, forKey: "hasSubmittedEmail")
+
+        // Tear down the overlay so the next onboarding run starts from the
+        // welcome animation (isFirstAppearance == true) instead of a warm
+        // cursor that has already been shown.
+        stopOnboardingMusic()
+        tearDownOnboardingVideo()
+        overlayWindowManager.hideOverlay()
+        overlayWindowManager.hasShownOverlayBefore = false
+        isOverlayVisible = false
+
+        // hasCompletedOnboarding is a plain UserDefaults-backed property (not
+        // @Published), so explicitly notify observers to re-render the panel
+        // into its first-run state showing the "Start" button.
+        objectWillChange.send()
+    }
+
     private func stopOnboardingMusic() {
         onboardingMusicFadeTimer?.invalidate()
         onboardingMusicFadeTimer = nil
