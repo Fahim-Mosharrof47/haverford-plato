@@ -47,6 +47,42 @@ final class CompanionManager: ObservableObject {
     /// True while the response transcript bubble should be visible beside the cursor.
     @Published private(set) var isShowingRealtimeResponseBubble: Bool = false
 
+    // MARK: - Plato — Visual highlights
+    /// Momentary teaching highlights drawn by the overlay. Always time-boxed;
+    /// cleared at every turn boundary so a stale absolute-coordinate box never
+    /// lingers after the user scrolls.
+    @Published var activeHighlights: [PlatoHighlight] = []
+    private var highlightExpirationTimer: Timer?
+
+    func addHighlight(_ highlight: PlatoHighlight) {
+        activeHighlights.append(highlight)
+        startHighlightExpirationTimerIfNeeded()
+    }
+
+    func clearAllHighlights() {
+        guard !activeHighlights.isEmpty || highlightExpirationTimer != nil else { return }
+        activeHighlights.removeAll()
+        highlightExpirationTimer?.invalidate()
+        highlightExpirationTimer = nil
+    }
+
+    /// Prunes expired highlights ~5x/sec. Runs only while highlights exist, then
+    /// stops itself — no always-on timer. Mirrors the bezier flight's Timer idiom.
+    private func startHighlightExpirationTimerIfNeeded() {
+        guard highlightExpirationTimer == nil else { return }
+        highlightExpirationTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = Date()
+                self.activeHighlights.removeAll { now.timeIntervalSince($0.createdAt) > $0.timeToLive }
+                if self.activeHighlights.isEmpty {
+                    self.highlightExpirationTimer?.invalidate()
+                    self.highlightExpirationTimer = nil
+                }
+            }
+        }
+    }
+
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
     @Published var onboardingVideoPlayer: AVPlayer?
@@ -1811,6 +1847,8 @@ final class CompanionManager: ObservableObject {
         pendingToolCallIdForCurrentTurn = nil
         isAwaitingForcedSpokenFollowUp = false
         isWaitingForRealtimeAudioQueueDrain = false
+        // MARK: - Plato — drop last turn's highlights before a new turn
+        clearAllHighlights()
         // MARK: - Skilly — Record turn start for usage tracking (key press → response.done)
         currentTurnStartTime = Date()
         beginRustRealtimeTurnTracking(turnPrefix: "ptt")
@@ -2205,6 +2243,8 @@ final class CompanionManager: ObservableObject {
             currentTurnStartTime = Date()
             beginRustRealtimeTurnTracking(turnPrefix: "vad")
             clearDetectedElementLocation()
+            // MARK: - Plato — drop last turn's highlights before a new turn
+            clearAllHighlights()
             clearRealtimeResponseBubble()
 
             voiceState = .listening
@@ -2438,6 +2478,8 @@ final class CompanionManager: ObservableObject {
         onboardingFocusTimerObservation = nil
         guidedOnboardingStep = nil
         clearDetectedElementLocation()
+        // MARK: - Plato
+        clearAllHighlights()
         hideOnboardingBubble()
         // Plato: drop any suppressed transcript bubble state so a normal
         // interaction right after the tour renders its bubble cleanly.
