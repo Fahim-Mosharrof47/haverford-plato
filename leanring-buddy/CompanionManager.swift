@@ -1670,16 +1670,43 @@ final class CompanionManager: ObservableObject {
             return
         }
 
-        let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+        let modelPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
             screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
             screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
             screenCapture: targetScreenCapture
         )
 
-        detectedElementScreenLocation = screenLocation
+        // MARK: - Plato — prefer the real control frame (by name) over guessed pixels
+        if let controlFrame = resolveControlGlobalFrame(
+            label: parsedPointDirective.elementLabel, approximatePoint: modelPoint
+        ) {
+            detectedElementScreenLocation = CGPoint(x: controlFrame.midX, y: controlFrame.midY)
+            detectedElementDisplayFrame = targetScreenCapture.displayFrame
+            detectedElementBubbleText = parsedPointDirective.elementLabel
+            addHighlight(PlatoHighlight(
+                kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
+                globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
+                createdAt: Date(), timeToLive: 4.0))
+            SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+            return
+        }
+
+        detectedElementScreenLocation = modelPoint
         detectedElementDisplayFrame = targetScreenCapture.displayFrame
         detectedElementBubbleText = parsedPointDirective.elementLabel
         SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+    }
+
+    // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
+    // over the model's guessed pixels. nil → caller falls back to model coordinates.
+    private func resolveControlGlobalFrame(label: String, approximatePoint: CGPoint) -> CGRect? {
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedLabel.isEmpty, let frameByName = AXElementResolver.controlFrame(matchingLabel: trimmedLabel) {
+            return frameByName
+        }
+        // Secondary: the element directly under the model's guessed point (only
+        // helps when the guess already landed on the right control).
+        return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint)
     }
 
     // MARK: - Plato — Tool argument decoding helpers (shared by highlight tools)
@@ -1725,6 +1752,22 @@ final class CompanionManager: ObservableObject {
             screenshotHeightInPixels: targetScreenCapture.screenshotHeightInPixels,
             displayFrame: targetScreenCapture.displayFrame
         )
+
+        // MARK: - Plato — snap a single control to its real AX frame (by name, then point)
+        if (arguments["snap_to_control"] as? Bool) ?? false {
+            let centerPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+                screenshotXInPixels: x + (width / 2),
+                screenshotYInPixels: y + (height / 2),
+                screenCapture: targetScreenCapture
+            )
+            if let axFrame = resolveControlGlobalFrame(label: label ?? "", approximatePoint: centerPoint) {
+                addHighlight(PlatoHighlight(
+                    kind: .strokedRegion(color: PlatoHighlight.color(forName: colorName), lineWidth: 2.5),
+                    globalFrame: axFrame, label: label, createdAt: Date(), timeToLive: 4.0))
+                return
+            }
+            // AX couldn't resolve (canvas/GPU app, no element) — fall through to the model bbox.
+        }
 
         let highlightColor = PlatoHighlight.color(forName: colorName)
         let kind: PlatoHighlight.Kind = (style == "outline")

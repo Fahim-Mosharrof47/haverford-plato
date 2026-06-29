@@ -466,7 +466,8 @@ final class OpenAIRealtimeClient: ObservableObject {
                     "color": ["type": "string", "enum": ["red", "blue", "green", "yellow"], "description": "Highlight color."],
                     "style": ["type": "string", "enum": ["filled", "outline"], "description": "'filled' shades the area; 'outline' draws only a ring. Defaults to filled."],
                     "label": ["type": "string", "description": "Short 1-3 word name of what is being highlighted."],
-                    "screen": ["type": "integer", "description": "1-based screen index when multiple screenshots were provided. Omit for the cursor's screen."]
+                    "screen": ["type": "integer", "description": "1-based screen index when multiple screenshots were provided. Omit for the cursor's screen."],
+                    "snap_to_control": ["type": "boolean", "description": "Set true when highlighting a single UI control (button, menu, icon) so the ring snaps to the real control via Accessibility. Omit/false for a free area like a paper region."]
                 ],
                 "required": ["x", "y", "width", "height", "color"]
             ]
