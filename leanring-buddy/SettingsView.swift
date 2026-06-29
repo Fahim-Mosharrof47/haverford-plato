@@ -291,8 +291,9 @@ struct SettingsView: View {
                 settingsPicker(
                     selection: $settings.pushToTalkShortcut,
                     options: [
-                        // MARK: - Plato — ctrl+option+0 is the default (a real key-combo, immune to
+                        // MARK: - Plato — ctrl+shift+8 is the default (a real key-combo, immune to
                         // bare-modifier chord collisions like the Raycast hyper key / ctrl+shift+tab).
+                        ("controlShiftEight", "Ctrl + Shift + 8"),
                         ("controlOptionZero", "Ctrl + Option + 0"),
                         ("controlOption", "Ctrl + Option"),
                         ("shiftControl", "Shift + Ctrl"),

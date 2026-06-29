@@ -14,8 +14,10 @@ enum BuddyPushToTalkShortcut {
         case shiftControl
         case controlOptionSpace
         case shiftControlSpace
-        // MARK: - Plato — Key-combo (modifiers + the "0" key). Default shortcut.
+        // MARK: - Plato — Key-combo (modifiers + the "0" key). Former default.
         case controlOptionZero
+        // MARK: - Plato — Key-combo (ctrl + shift + the "8" key). Current default shortcut.
+        case controlShiftEight
 
         init(storedValue: String) {
             switch storedValue {
@@ -31,8 +33,10 @@ enum BuddyPushToTalkShortcut {
                 self = .shiftControlSpace
             case "controlOptionZero":
                 self = .controlOptionZero
+            case "controlShiftEight":
+                self = .controlShiftEight
             default:
-                self = .controlOptionZero
+                self = .controlShiftEight
             }
         }
 
@@ -50,6 +54,8 @@ enum BuddyPushToTalkShortcut {
                 return "shift + control + space"
             case .controlOptionZero:
                 return "ctrl + option + 0"
+            case .controlShiftEight:
+                return "ctrl + shift + 8"
             }
         }
 
@@ -67,6 +73,8 @@ enum BuddyPushToTalkShortcut {
                 return ["shift", "control", "space"]
             case .controlOptionZero:
                 return ["ctrl", "option", "0"]
+            case .controlShiftEight:
+                return ["ctrl", "shift", "8"]
             }
         }
 
@@ -78,7 +86,7 @@ enum BuddyPushToTalkShortcut {
                 return [.control, .option]
             case .shiftControl:
                 return [.shift, .control]
-            case .controlOptionSpace, .shiftControlSpace, .controlOptionZero:
+            case .controlOptionSpace, .shiftControlSpace, .controlOptionZero, .controlShiftEight:
                 return nil
             }
         }
@@ -99,6 +107,8 @@ enum BuddyPushToTalkShortcut {
                 return [.shift, .control]
             case .controlOptionZero:
                 return [.control, .option]
+            case .controlShiftEight:
+                return [.control, .shift]
             }
         }
 
@@ -112,6 +122,8 @@ enum BuddyPushToTalkShortcut {
                 return 49  // Space
             case .controlOptionZero:
                 return 29  // ANSI "0" on the number row
+            case .controlShiftEight:
+                return 28  // ANSI "8" on the number row
             }
         }
     }
@@ -129,12 +141,12 @@ enum BuddyPushToTalkShortcut {
     }
 
     static var currentShortcutOption: ShortcutOption {
-        // MARK: - Plato — Default is ctrl+option+0, a real key-combo (modifiers + the "0" key).
+        // MARK: - Plato — Default is ctrl+shift+8, a real key-combo (modifiers + the "8" key).
         // Bare modifier-only defaults (the original control+option) collided with common chords —
         // Raycast/hyper keys (control+option+command), ctrl+shift+tab, IDE command palettes — and
-        // made Plato trigger by itself. Requiring the "0" key means none of those bare-modifier
-        // chords can fire it, and the exact-modifier match below rejects supersets like hyper+0.
-        let storedShortcutValue = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlOptionZero"
+        // made Plato trigger by itself. Requiring the "8" key means none of those bare-modifier
+        // chords can fire it, and the exact-modifier match below rejects supersets like hyper+8.
+        let storedShortcutValue = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlShiftEight"
         return ShortcutOption(storedValue: storedShortcutValue)
     }
     static let pushToTalkKeyCode: UInt16 = 49 // Space
@@ -170,6 +182,47 @@ enum BuddyPushToTalkShortcut {
                 .intersection(.deviceIndependentFlagsMask),
             wasShortcutPreviouslyPressed: wasShortcutPreviouslyPressed
         )
+    }
+
+    // MARK: - Plato — Whether the event tap should SWALLOW this event.
+    // The global tap is an active (.defaultTap) tap, so returning nil for an event
+    // deletes it before it reaches the frontmost app. We swallow ONLY the active
+    // shortcut's own key presses — for a key-combo, the keyDown/keyUp of its key
+    // while its modifiers are held (including OS auto-repeats). Without this, the
+    // modified keystroke (e.g. ctrl+shift+8) falls through to whatever app is
+    // focused, which has no handler for it and plays the macOS "unhandled key"
+    // beep on every press/repeat. Requiring the modifiers means a bare keystroke
+    // (typing "8") is never swallowed, so the key still types normally. Modifier-
+    // only shortcuts have no key to swallow — and bare modifiers must reach other
+    // apps — so they never consume anything.
+    static func shouldConsumeEvent(
+        for eventType: CGEventType,
+        keyCode: UInt16,
+        modifierFlagsRawValue: UInt64,
+        wasShortcutPreviouslyPressed: Bool
+    ) -> Bool {
+        guard currentShortcutOption.modifierOnlyFlags == nil,
+              let keyComboModifierFlags = currentShortcutOption.spaceShortcutModifierFlags,
+              let keyComboKeyCode = currentShortcutOption.keyComboKeyCode,
+              keyCode == keyComboKeyCode else {
+            return false
+        }
+
+        let heldModifiers = NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection([.control, .option, .command, .shift, .function])
+
+        switch eventType {
+        case .keyDown:
+            // Initial press + auto-repeats: the shortcut key with exactly its modifiers.
+            return heldModifiers == keyComboModifierFlags
+        case .keyUp:
+            // Releasing the shortcut key: swallow while mid-press or with modifiers
+            // still held, so the matching keyUp also never reaches the app.
+            return wasShortcutPreviouslyPressed || heldModifiers == keyComboModifierFlags
+        default:
+            return false
+        }
     }
 
     private static func shortcutEventType(for eventType: NSEvent.EventType) -> ShortcutEventType? {

@@ -16,6 +16,9 @@ import SwiftUI
 
 extension Notification.Name {
     static let skillyDismissPanel = Notification.Name("skillyDismissPanel")
+    // MARK: - Plato — Asks the panel manager to open the panel during the guided
+    // onboarding tour (so Plato can point its cursor at real panel controls).
+    static let platoShowPanelForOnboarding = Notification.Name("platoShowPanelForOnboarding")
     static let skillyTurnBlocked = Notification.Name("skillyTurnBlocked")
     // MARK: - Skilly — Posted when the Worker rejects /openai/token with 401.
     // CompanionManager signs the user out and posts this; MenuBarPanelManager
@@ -38,6 +41,8 @@ final class MenuBarPanelManager: NSObject {
     private var dismissPanelObserver: NSObjectProtocol?
     // MARK: - Skilly — Observer for auth-expired event (stale Worker session token)
     private var authExpiredObserver: NSObjectProtocol?
+    // MARK: - Plato — Observer that opens the panel for the guided onboarding tour.
+    private var showForOnboardingObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     // MARK: - Skilly
@@ -74,6 +79,18 @@ final class MenuBarPanelManager: NSObject {
                 self?.showPanel()
             }
         }
+
+        // MARK: - Plato — Open the panel when the onboarding tour needs to point
+        // at a real control inside it (focus timer, add-skill button).
+        showForOnboardingObserver = NotificationCenter.default.addObserver(
+            forName: .platoShowPanelForOnboarding,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.showPanel()
+            }
+        }
     }
 
     deinit {
@@ -84,6 +101,9 @@ final class MenuBarPanelManager: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = authExpiredObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = showForOnboardingObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }

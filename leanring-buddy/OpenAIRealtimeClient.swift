@@ -265,7 +265,7 @@ final class OpenAIRealtimeClient: ObservableObject {
 
     func connect(
         systemPrompt: String? = nil,
-        voiceName: String = "coral"
+        voiceName: String = "ash"
     ) async throws {
         let token = try await fetchToken()
         currentModel = token.model
@@ -650,10 +650,16 @@ final class OpenAIRealtimeClient: ObservableObject {
     func requestForcedSpokenResponse(instruction: String) {
         guard isConnected else { return }
 
+        // MARK: - Plato — GA Realtime shape (see commitAudioAndRespond): the
+        // beta `response.modalities` field is rejected by the GA API with
+        // "Unknown parameter: 'response.modalities'", which silently killed the
+        // whole response — so forced spoken responses (onboarding intro, focus
+        // nudges) never produced audio. Use `output_modalities`; the spoken
+        // transcript still arrives via response.audio_transcript.delta.
         let responseEvent: [String: Any] = [
             "type": "response.create",
             "response": [
-                "modalities": ["text", "audio"],
+                "output_modalities": ["audio"],
                 "tool_choice": "none",
                 "instructions": instruction
             ]

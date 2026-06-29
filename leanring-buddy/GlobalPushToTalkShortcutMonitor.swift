@@ -3,8 +3,10 @@
 //  leanring-buddy
 //
 //  Captures push-to-talk keyboard shortcuts while makesomething is running in the
-//  background. Uses a listen-only CGEvent tap so modifier-only shortcuts like
-//  ctrl + option behave more like a real system-wide voice tool.
+//  background. Uses an active (.defaultTap) CGEvent tap so it can SWALLOW the
+//  shortcut's own key presses — otherwise a key-combo like ctrl + shift + 8 falls
+//  through to the frontmost app, which beeps on the unhandled modified keystroke.
+//  Only the shortcut's own keys are consumed; all other input passes through.
 //
 
 import AppKit
@@ -60,7 +62,11 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         guard let globalEventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            // MARK: - Plato — Active tap (was .listenOnly) so the callback can return
+            // nil to delete the shortcut's own key events before they reach the focused
+            // app. A listen-only tap can only observe, so the modified keystroke fell
+            // through and the app beeped on it (the "unhandled key" ping).
+            options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -136,6 +142,16 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             wasShortcutPreviouslyPressed: isShortcutCurrentlyPressed
         )
 
+        // MARK: - Plato — Decide whether to swallow this event BEFORE the switch
+        // below mutates isShortcutCurrentlyPressed, so the keyUp case sees the
+        // pre-release state.
+        let shouldConsumeShortcutKeyEvent = BuddyPushToTalkShortcut.shouldConsumeEvent(
+            for: eventType,
+            keyCode: eventKeyCode,
+            modifierFlagsRawValue: event.flags.rawValue,
+            wasShortcutPreviouslyPressed: isShortcutCurrentlyPressed
+        )
+
         switch shortcutTransition {
         case .none:
             break
@@ -145,6 +161,14 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         case .released:
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
+        }
+
+        // MARK: - Plato — Swallow the shortcut's own key events so the modified
+        // keystroke never reaches the frontmost app (which would beep on it).
+        // Everything else (typing, modifiers, Escape, other apps' shortcuts)
+        // passes through untouched.
+        if shouldConsumeShortcutKeyEvent {
+            return nil
         }
 
         return Unmanaged.passUnretained(event)

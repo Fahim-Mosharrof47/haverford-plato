@@ -21,6 +21,11 @@ struct PanelBodyView: View {
     @ObservedObject var pomodoro: PomodoroTimer
     // MARK: - Plato — settings (timer durations live-edit + BYOK gate for the plan strip)
     @ObservedObject var settings = AppSettings.shared
+    // MARK: - Plato — used only to report panel control frames to the guided
+    // onboarding tour so Plato can point its cursor at them. Intentionally not
+    // @ObservedObject: this view doesn't render its state, so observing it would
+    // only add re-render churn.
+    var companionManager: CompanionManager
 
     @State private var hoveredSkillId: String?
     @State private var pendingDeletion: PendingDeletion?
@@ -189,6 +194,13 @@ struct PanelBodyView: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
+                // MARK: - Plato — report this control's on-screen frame so the
+                // guided onboarding tour can fly the cursor to the Start button.
+                .background(
+                    OnboardingTargetFrameReporter { screenRect in
+                        companionManager.registerOnboardingTargetFrame(.focusTimerStart, screenRect: screenRect)
+                    }
+                )
 
                 Button(action: { pomodoro.reset() }) {
                     Image(systemName: "arrow.counterclockwise")
@@ -675,6 +687,13 @@ struct PanelBodyView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+        // MARK: - Plato — report this control's on-screen frame so the guided
+        // onboarding tour can fly the cursor to the "Import skill" button.
+        .background(
+            OnboardingTargetFrameReporter { screenRect in
+                companionManager.registerOnboardingTargetFrame(.addSkill, screenRect: screenRect)
+            }
+        )
         .padding(.top, 4)
     }
 

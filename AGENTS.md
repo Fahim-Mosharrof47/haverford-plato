@@ -4,7 +4,7 @@
 
 Skilly (tryskilly.app) is a macOS menu bar AI teaching companion that sees the user's screen, speaks to them, and physically points at UI elements — powered by domain-specific teaching skills. Built as a fork of [Clicky by Farza](https://github.com/farzaa/clicky) (MIT License).
 
-Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input and screenshots, then streams them via a single OpenAI Realtime WebSocket connection that handles transcription, vision, chat, and TTS in one unified pipeline. A blue cursor overlay can fly to and point at UI elements the AI references on any connected monitor.
+Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+shift+8) to capture voice input and screenshots, then streams them via a single OpenAI Realtime WebSocket connection that handles transcription, vision, chat, and TTS in one unified pipeline. A blue cursor overlay can fly to and point at UI elements the AI references on any connected monitor.
 
 When a teaching skill is active (e.g., Blender Fundamentals), the companion's system prompt is layered with domain expertise, curriculum context, and UI vocabulary — turning generic AI assistance into expert tutoring.
 
@@ -18,7 +18,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
 - **AI Pipeline**: OpenAI Realtime API via WebSocket (`gpt-4o-realtime-preview`) — single connection handles audio streaming, transcription, vision, chat, and TTS
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
-- **Voice Input**: Push-to-talk via `AVAudioEngine` + `appendAudioChunk()` to OpenAI Realtime. System-wide keyboard shortcut via listen-only CGEvent tap.
+- **Voice Input**: Push-to-talk via `AVAudioEngine` + `appendAudioChunk()` to OpenAI Realtime. System-wide keyboard shortcut via an active (`.defaultTap`) CGEvent tap that consumes the shortcut's own key events.
 - **Element Pointing**: AI embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target. Edge-proximity check suppresses animation when coordinates are within 5% of any screen edge.
 - **Auth**: WorkOS AuthKit via browser → `skilly://auth/callback` deep link → Keychain session storage
 - **Skill System**: SKILL.md files parsed at runtime, layered into system prompt with curriculum tracking
@@ -54,7 +54,7 @@ Legacy secrets (unused by current pipeline): `ANTHROPIC_API_KEY`, `ASSEMBLYAI_AP
 
 **Cursor Overlay**: A full-screen transparent `NSWindow` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
 
-**Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
+**Global Push-To-Talk Shortcut**: Background push-to-talk uses an active (`.defaultTap`) `CGEvent` tap (head-inserted at `.cgSessionEventTap`) instead of an AppKit global monitor so the shortcut is detected reliably in the background AND its own key events can be consumed (callback returns `nil`). Consuming matters for key-combo shortcuts (e.g. `ctrl + shift + 8`): otherwise the modified keystroke falls through to the frontmost app, which beeps on the unhandled key. Only the shortcut's own keys are swallowed (`BuddyPushToTalkShortcut.shouldConsumeEvent`); all other input — typing, modifiers, Escape, other apps' shortcuts — passes through. Requires Accessibility permission (already needed for window shrinking / cursor pointing).
 
 **OpenAI Realtime Pipeline**: A single WebSocket connection to OpenAI handles the entire voice interaction: audio in (PCM16 mono 16kHz via `appendAudioChunk()`), screenshots (JPEG via `sendScreenshot()`), transcription, vision, LLM response, and TTS audio out (PCM16 24kHz via `response.audio.delta`). This replaces the previous chained pipeline of AssemblyAI + Claude + ElevenLabs.
 
@@ -87,13 +87,13 @@ Legacy secrets (unused by current pipeline): `ANTHROPIC_API_KEY`, `ASSEMBLYAI_AP
 | `RealtimeAudioPlayer.swift` | ~115 | PCM16 24kHz audio playback via `AVAudioEngine` + `AVAudioPlayerNode`. Converts Int16 → Float32 normalized to [-1, 1]. |
 | `RealtimeTelemetry.swift` | ~450 | JSONL telemetry logger for Realtime sessions. Per-turn rows (token counts, timing, speech durations, vision usage) and session summary written to `~/Library/Application Support/skilly-telemetry.jsonl`. Also forwards aggregate metrics to PostHog. |
 | `RealtimePricing.swift` | ~40 | OpenAI Realtime API pricing constants (per-million rates for audio in/out, text in/out, cached input). Used by telemetry for cost accounting. |
-| `GlobalPushToTalkShortcutMonitor.swift` | ~150 | System-wide push-to-talk via listen-only `CGEvent` tap. Publishes `.pressed` / `.released` events. |
+| `GlobalPushToTalkShortcutMonitor.swift` | ~165 | System-wide push-to-talk via an active (`.defaultTap`) `CGEvent` tap. Publishes `.pressed` / `.released` events and consumes (returns `nil` for) the shortcut's own key events so the modified keystroke never reaches the focused app (no "unhandled key" beep). |
 | `DesignSystem.swift` | ~870 | Design tokens. `DS.Colors`, `DS.CornerRadius`, `DS.Spacing`, button styles (primary/secondary/tertiary/text/outlined/destructive/icon), animation durations, pointer cursor system. |
 | `WindowPositionManager.swift` | ~270 | Permission checks (`AXIsProcessTrusted`, `CGPreflightScreenCaptureAccess`). Window shrinking via Accessibility API. Screen recording permission fallback via UserDefaults. |
 | `AppSettings.swift` | ~195 | UserDefaults-backed settings: worker base URL, voice name, transient cursor mode, analytics opt-out, push-to-talk config, language, dev mode toggles. |
 | `AppBundleConfiguration.swift` | ~30 | Runtime config reader for Info.plist keys (bundle ID, version, name). |
 | `AppDetectionMonitor.swift` | ~50 | `NSWorkspace` frontmost app bundle ID monitoring for auto-activating skills. |
-| `BuddyPushToTalkShortcut.swift` | ~210 | Hotkey shortcut model + customization UI support. Default: `control + option`. Wraps `GlobalPushToTalkShortcutMonitor` and exposes recording/editing state for Settings. |
+| `BuddyPushToTalkShortcut.swift` | ~210 | Hotkey shortcut model + customization UI support. Default: `ctrl + shift + 8` (a key-combo: modifiers + ANSI "8"/keyCode 28, exact-modifier matched so supersets like the hyper key can't self-trigger). Wraps `GlobalPushToTalkShortcutMonitor` and exposes recording/editing state for Settings. |
 | `SkillyNotificationManager.swift` | ~80 | User-facing system notifications (via `UNUserNotificationCenter`) for trial warnings, cap warnings, and subscription state changes. |
 
 ### Auth & Analytics

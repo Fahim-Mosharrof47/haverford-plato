@@ -68,7 +68,7 @@ struct CompanionPanelView: View {
                     .padding(.bottom, 12)
             } else if let skillManager {
                 // Main content — single unified view, no navigation
-                PanelBodyView(skillManager: skillManager, pomodoro: companionManager.pomodoro)
+                PanelBodyView(skillManager: skillManager, pomodoro: companionManager.pomodoro, companionManager: companionManager)
             }
 
             Divider()
@@ -120,8 +120,10 @@ struct CompanionPanelView: View {
                     Text("Hold")
                         .font(.system(size: 11))
                         .foregroundColor(DS.Colors.textTertiary)
+                    // MARK: - Plato — push-to-talk shortcut is ctrl+shift+8 (see BuddyPushToTalkShortcut).
                     keyCap("⌃")
-                    keyCap("⌥")
+                    keyCap("⇧")
+                    keyCap("8")
                     Text("to talk")
                         .font(.system(size: 11))
                         .foregroundColor(DS.Colors.textTertiary)
@@ -270,7 +272,7 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted && isEffectivelySignedIn {
-            Text("Hold Control+Option to talk.")
+            Text("Hold Control+Shift+8 to talk.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

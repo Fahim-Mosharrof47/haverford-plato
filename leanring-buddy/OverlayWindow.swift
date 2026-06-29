@@ -142,10 +142,7 @@ struct BlueCursorView: View {
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
     }
     @State private var timer: Timer?
-    @State private var welcomeText: String = ""
-    @State private var showWelcome: Bool = true
     @State private var bubbleSize: CGSize = .zero
-    @State private var bubbleOpacity: Double = 1.0
     @State private var cursorOpacity: Double = 0.0
 
     // MARK: - Buddy Navigation State
@@ -189,8 +186,6 @@ struct BlueCursorView: View {
     private let onboardingVideoPlayerWidth: CGFloat = 330
     private let onboardingVideoPlayerHeight: CGFloat = 186
 
-    private let fullWelcomeMessage = "hey! i'm skilly"
-
     private let navigationPointerPhrases = [
         "right here!",
         "this one!",
@@ -204,38 +199,6 @@ struct BlueCursorView: View {
         ZStack {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
-
-            // Welcome speech bubble (first launch only)
-            if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
-                Text(welcomeText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
-                    )
-                    .fixedSize()
-                    .overlay(
-                        GeometryReader { geo in
-                            Color.clear
-                                .preference(key: SizePreferenceKey.self, value: geo.size)
-                        }
-                    )
-                    .opacity(bubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                    .animation(.easeOut(duration: 0.5), value: bubbleOpacity)
-                    .onPreferenceChange(SizePreferenceKey.self) { newSize in
-                        bubbleSize = newSize
-                    }
-                    // MARK: - Skilly — Accessibility
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Skilly welcome message")
-                    .accessibilityValue(welcomeText)
-            }
 
             // Onboarding video — always in the view tree so opacity animation works
             // reliably. When no player exists or opacity is 0, nothing is visible.
@@ -256,7 +219,9 @@ struct BlueCursorView: View {
                 .accessibilityLabel("Onboarding video")
                 .accessibilityHidden(true)
 
-            // Onboarding prompt — "press control + option and say hi" streamed after video ends
+            // Onboarding prompt — the guided tour's per-step instruction bubble,
+            // streamed character-by-character. Driven by CompanionManager's
+            // showOnboardingBubble during the guided onboarding tour.
             if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
                 Text(companionManager.onboardingPromptText)
                     .font(.system(size: 11, weight: .medium))
@@ -339,7 +304,12 @@ struct BlueCursorView: View {
             // Navigation pointer bubble — shown when buddy arrives at a detected element.
             // Pops in with a scale-bounce (0.5x → 1.0x spring) and a bright initial
             // glow that settles, creating a "materializing" effect.
-            if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
+            // Plato: during the guided onboarding tour, the live transcript bubble
+            // (what Plato is saying) is the sole text shown at the cursor, so
+            // suppress this pointer label to avoid a second box. The cursor still
+            // flies to and points at the target — only the label is hidden.
+            if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty
+                && companionManager.guidedOnboardingStep == nil {
                 Text(navigationBubbleText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white)
@@ -452,15 +422,15 @@ struct BlueCursorView: View {
 
             startTrackingCursor()
 
-            // Only show welcome message on first appearance (app start)
-            // and only if the cursor starts on this screen
+            // Plato — first appearance (app start), cursor on this screen.
+            // No "hey i'm skilly" welcome bubble: once the cursor has faded in,
+            // go straight to Plato's own spoken + visible self-introduction.
             if isFirstAppearance && isCursorOnThisScreen {
                 withAnimation(.easeIn(duration: 2.0)) {
                     self.cursorOpacity = 1.0
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.bubbleOpacity = 0.0
-                    startWelcomeAnimation()
+                    self.companionManager.setupOnboardingVideo()
                 }
             } else {
                 self.cursorOpacity = 1.0
@@ -557,9 +527,6 @@ struct BlueCursorView: View {
 
     /// Starts animating the buddy toward a detected UI element location.
     private func startNavigatingToElement(screenLocation: CGPoint) {
-        // Don't interrupt welcome animation
-        guard !showWelcome || welcomeText.isEmpty else { return }
-
         // Convert the AppKit screen location to SwiftUI coordinates for this screen
         let targetInSwiftUI = convertScreenPointToSwiftUICoordinates(screenLocation)
 
@@ -775,34 +742,6 @@ struct BlueCursorView: View {
         companionManager.clearDetectedElementLocation()
     }
 
-    // MARK: - Welcome Animation
-
-    private func startWelcomeAnimation() {
-        withAnimation(.easeIn(duration: 0.4)) {
-            self.bubbleOpacity = 1.0
-        }
-
-        var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < self.fullWelcomeMessage.count else {
-                timer.invalidate()
-                // Hold the text for 2 seconds, then fade it out
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.bubbleOpacity = 0.0
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
-                }
-                return
-            }
-
-            let index = self.fullWelcomeMessage.index(self.fullWelcomeMessage.startIndex, offsetBy: currentIndex)
-            self.welcomeText.append(self.fullWelcomeMessage[index])
-            currentIndex += 1
-        }
-    }
 }
 
 // MARK: - Blue Cursor Waveform

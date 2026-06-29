@@ -62,6 +62,29 @@ final class CompanionManager: ObservableObject {
     @Published var onboardingPromptOpacity: Double = 0.0
     @Published var showOnboardingPrompt: Bool = false
 
+    // MARK: - Plato — Guided onboarding tour state
+    /// The step the guided first-run tour is on, or nil when it isn't running.
+    enum OnboardingStep {
+        case intro
+        case focusTimer
+        case skills
+        case research
+    }
+    /// A panel control the tour can fly the cursor to.
+    enum OnboardingPointTarget {
+        case focusTimerStart
+        case addSkill
+    }
+    @Published private(set) var guidedOnboardingStep: OnboardingStep?
+    /// Live on-screen (AppKit) frames of pointable panel controls, reported by the panel.
+    private var onboardingTargetScreenFrames: [OnboardingPointTarget: CGRect] = [:]
+    /// Per-step fallback timer that advances the tour if the user doesn't act.
+    private var onboardingStepTimeoutTimer: Timer?
+    /// Types out the persistent instruction bubble for the current step.
+    private var onboardingBubbleTypeTimer: Timer?
+    /// Watches the focus timer so the tour advances the moment a block starts.
+    private var onboardingFocusTimerObservation: AnyCancellable?
+
     // MARK: - Onboarding Music
 
     private var onboardingMusicPlayer: AVAudioPlayer?
@@ -458,6 +481,13 @@ final class CompanionManager: ObservableObject {
     /// Intentionally does NOT sign the user out or touch permissions/skills —
     /// it only rewinds onboarding so clicking "Start" replays the full intro.
     func resetOnboardingForDemo() {
+        // Plato: fully tear down any in-progress guided tour first. Otherwise its
+        // step state (guidedOnboardingStep) and timers survive the rewind — a
+        // lingering non-nil step would keep the realtime transcript bubble
+        // suppressed for later interactions, and an orphaned step timer could
+        // fire after the reset.
+        finishGuidedOnboarding()
+
         // Rewind the first-run flags the panel gates on.
         hasCompletedOnboarding = false
         hasSubmittedEmail = false
@@ -501,10 +531,10 @@ final class CompanionManager: ObservableObject {
             player.play()
             self.onboardingMusicPlayer = player
 
-            // After 1m 30s, fade the music out over 3s
-            onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in
-                self?.fadeOutOnboardingMusic()
-            }
+            // Plato — the music is faded out by the guided tour itself
+            // (finishGuidedOnboarding, when the tour ends), so it accompanies the
+            // whole intro instead of the old fixed 90s timer that was sized for
+            // the removed (longer) intro video.
         } catch {
             // MARK: - Skilly — Debug logging (stripped in release)
             #if DEBUG
@@ -933,8 +963,16 @@ final class CompanionManager: ObservableObject {
             clearDetectedElementLocation()
             clearRealtimeResponseBubble()
 
-            // Dismiss the onboarding prompt if it's showing
-            if showOnboardingPrompt {
+            // Plato: when the user holds push-to-talk to take their own turn, end
+            // any guided tour first. Clearing guidedOnboardingStep lifts the
+            // transcript-bubble suppression — otherwise Plato answers the user's
+            // question aloud with no on-screen text. finishGuidedOnboarding also
+            // hides the tour's instruction bubble, so the answer doesn't stack a
+            // second box on top of it.
+            if guidedOnboardingStep != nil {
+                finishGuidedOnboarding()
+            } else if showOnboardingPrompt {
+                // Not in a tour, but a prompt is lingering — dismiss it.
                 withAnimation(.easeOut(duration: 0.3)) {
                     onboardingPromptOpacity = 0.0
                 }
@@ -966,6 +1004,7 @@ final class CompanionManager: ObservableObject {
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
+    - speak in a calm, steady, grounded tone — composed and reassuring, like a wise mentor who's never rattled. but keep a normal conversational pace: don't slow down, drag words out, or go soft, breathy, or sleepy. calm and clear, not mellow or sluggish.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
     - if the user's question relates to what's on their screen, reference specific things you see.
@@ -1090,6 +1129,13 @@ final class CompanionManager: ObservableObject {
                 output: #"{"status":"error","papers":[],"message":"Empty query."}"#
             )
             return
+        }
+
+        // MARK: - Plato — A real research question during the guided onboarding
+        // tour advances (and finishes) it, so the demo flows straight into the
+        // live search the user just triggered.
+        if guidedOnboardingStep == .research {
+            advanceOnboarding()
         }
 
         // Cap to a single in-flight research call for the MVP.
@@ -1469,6 +1515,13 @@ final class CompanionManager: ObservableObject {
     // MARK: - Realtime Response Bubble
 
     private func showRealtimeResponseBubble() {
+        // Plato: a new response's audio is starting — drop any text a previous
+        // response left displayed (e.g. an onboarding step's caption, which we
+        // intentionally persist past its own audio) so this response never paints
+        // with stale text. The first .audioTranscriptDelta repopulates it; if that
+        // transcript is ever delayed, the bubble stays blank rather than showing
+        // the wrong line under the new audio.
+        realtimeResponseBubbleText = ""
         isShowingRealtimeResponseBubble = true
     }
 
@@ -2219,7 +2272,24 @@ final class CompanionManager: ObservableObject {
         guard isWaitingForRealtimeAudioQueueDrain else { return }
         isWaitingForRealtimeAudioQueueDrain = false
         voiceState = .idle
-        clearRealtimeResponseBubble()
+        // Plato: during the guided tour, keep the just-spoken line's caption
+        // visible after the audio drains (it's replaced when the next step speaks,
+        // or cleared by finishGuidedOnboarding) so the guidance stays on screen
+        // while the user acts, instead of blanking between steps. Normal turns
+        // clear the bubble as before.
+        if guidedOnboardingStep == nil {
+            clearRealtimeResponseBubble()
+        }
+        // Plato: the final tour step (research) has no follow-on step. Once its
+        // spoken line finishes playing, end the tour shortly after instead of
+        // waiting out the long no-speech fallback timeout — that fallback left a
+        // big lag (~14s of dead air with the music still playing) after the last
+        // word. scheduleOnboardingAdvance replaces that fallback timer; for the
+        // research step advanceOnboarding calls finishGuidedOnboarding, which
+        // fades the music out. A user push-to-talk still ends the tour immediately.
+        if guidedOnboardingStep == .research {
+            scheduleOnboardingAdvance(after: onboardingFinalStepEndDelaySeconds)
+        }
         scheduleTransientHideIfNeeded()
         resetRustRealtimeTracking()
         if !hasEndedAssistantSpeechForCurrentTurn {
@@ -2266,23 +2336,291 @@ final class CompanionManager: ObservableObject {
     /// Sets up the onboarding video player, starts playback, and schedules
     /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
     func setupOnboardingVideo() {
-        // MARK: - Plato — Farza's intro video is replaced by Plato introducing ITSELF.
-        performPlatoIntro()
+        // MARK: - Plato — Farza's intro video is replaced by Plato's guided self-introduction tour.
+        startGuidedOnboarding()
     }
 
-    /// Plato introduces itself on first run: a best-effort spoken greeting (when the realtime
-    /// session connects — e.g. a BYOK key is set) plus a visible text intro that always appears.
-    /// This one-time intro is the only proactive speech besides focus-block distraction nudges.
-    private func performPlatoIntro() {
+    // MARK: - Plato — Guided onboarding tour
+    //
+    // A fixed-script, 4-step first-run tour. Plato introduces itself, then walks
+    // the user through the focus timer, skills, and research lookup. Each step
+    // shows a persistent instruction bubble on the cursor, speaks the same point
+    // aloud, and (for the timer/skills) flies the cursor to the real panel
+    // control. A step advances when Plato detects the user doing the thing
+    // (starting a focus block, asking a research question); a per-step timeout
+    // keeps the tour moving so it never stalls. Scripts are the constants below.
+
+    /// How long a step waits for the user to act before advancing on its own.
+    private var onboardingStepTimeoutSeconds: TimeInterval { 13.0 }
+
+    /// How long the final step lingers after its spoken line finishes before the
+    /// tour ends and the music fades. Keeps the ending from feeling abrupt while
+    /// avoiding the long dead-air lag the no-speech fallback timeout used to cause.
+    private var onboardingFinalStepEndDelaySeconds: TimeInterval { 2.0 }
+
+    /// Begins the guided tour: prewarm the realtime session (so Plato can speak),
+    /// start the ambient music, and run the first step.
+    func startGuidedOnboarding() {
+        // Plato: clear any realtime transcript bubble left over from a prior
+        // interaction so the tour starts with only its own instruction bubble.
+        clearRealtimeResponseBubble()
         startRealtimeSessionPrewarmIfNeeded()
-        // Give the socket a moment to connect, then have Plato speak its introduction.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.openAIRealtimeClient.requestForcedSpokenResponse(
-                instruction: "Introduce yourself as Plato, the user's academic research companion, in one warm spoken greeting of two or three sentences. Say you can see their screen and can help them read papers, write and proofread, debug code and statistics, find real citations, and stay focused with a built-in timer — and that they can hold Control and Option any time to talk to you. Be natural and welcoming; do not call any tools."
-            )
+        startOnboardingMusic()
+        runOnboardingStep(.intro)
+    }
+
+    private func runOnboardingStep(_ step: OnboardingStep) {
+        guidedOnboardingStep = step
+        // Each step re-arms its own timers/observers; clear the previous ones.
+        onboardingStepTimeoutTimer?.invalidate()
+        onboardingFocusTimerObservation = nil
+
+        switch step {
+        case .intro:
+            narrateOnboardingStep("Hi, I'm Plato, your study and research partner. I can see your screen and help with whatever you're curious about. Let me give you a quick tour.")
+            scheduleOnboardingAdvance(after: onboardingStepTimeoutSeconds)
+
+        case .focusTimer:
+            narrateOnboardingStep("First, your focus timer. Start a block and I'll help you stay on task. If you drift to something distracting, I'll gently nudge you back.")
+            pointCursorAtOnboardingTarget(.focusTimerStart, label: "start a block")
+            // Advance the instant the user actually starts a focus block...
+            observeFocusTimerStartForOnboarding()
+            // ...otherwise just move on (chosen fallback — Plato does not start it for them).
+            scheduleOnboardingAdvance(after: onboardingStepTimeoutSeconds)
+
+        case .skills:
+            narrateOnboardingStep(skillsStepNarration())
+            pointCursorAtOnboardingTarget(.addSkill, label: "add skills here")
+            // Explain, then auto-advance (chosen behavior).
+            scheduleOnboardingAdvance(after: onboardingStepTimeoutSeconds)
+
+        case .research:
+            // No control to point at — clear the panel so the screen is calm for
+            // the "ask me something" moment.
+            NotificationCenter.default.post(name: .skillyDismissPanel, object: nil)
+            let pushToTalkShortcut = BuddyPushToTalkShortcut.pushToTalkDisplayText
+            narrateOnboardingStep("I can also look up real research papers. Curious about something? Hold \(pushToTalkShortcut) and just ask me — for example, find papers on a topic you care about.")
+            // Normal end: when the line finishes speaking, handleRealtimeAudioQueueDrained
+            // ends the tour after onboardingFinalStepEndDelaySeconds. A user push-to-talk
+            // (or handleScholarToolCall detecting a search) ends it sooner. This longer
+            // timeout is only a fallback for the case where the line never plays at all
+            // (e.g. the realtime session never connected), so the tour can't hang.
+            scheduleOnboardingAdvance(after: onboardingStepTimeoutSeconds + 9.0)
         }
-        // Visible text introduction — reliable even if the spoken intro can't connect yet.
-        startOnboardingPromptStream()
+    }
+
+    /// Narrates one step's line in Plato's voice. The on-cursor caption is NOT a
+    /// pre-scripted bubble — it's the live transcript of this very speech (the
+    /// realtime response bubble), so the text the user reads always matches what
+    /// they hear, even though gpt-realtime may not voice the line perfectly
+    /// word-for-word. (A pre-scripted bubble could never match the model's
+    /// paraphrase, which is exactly the mismatch this avoids.)
+    private func narrateOnboardingStep(_ line: String) {
+        speakOnboardingLine(line)
+    }
+
+    /// Move to the next step, or finish after the last one.
+    private func advanceOnboarding() {
+        switch guidedOnboardingStep {
+        case .intro: runOnboardingStep(.focusTimer)
+        case .focusTimer: runOnboardingStep(.skills)
+        case .skills: runOnboardingStep(.research)
+        case .research: finishGuidedOnboarding()
+        case .none: break
+        }
+    }
+
+    /// Tears the tour down: stop timers/observers, hide the bubble and pointer,
+    /// and fade the music. Safe to call at any time.
+    func finishGuidedOnboarding() {
+        onboardingStepTimeoutTimer?.invalidate()
+        onboardingStepTimeoutTimer = nil
+        onboardingFocusTimerObservation = nil
+        guidedOnboardingStep = nil
+        clearDetectedElementLocation()
+        hideOnboardingBubble()
+        // Plato: drop any suppressed transcript bubble state so a normal
+        // interaction right after the tour renders its bubble cleanly.
+        clearRealtimeResponseBubble()
+        fadeOutOnboardingMusic()
+    }
+
+    private func scheduleOnboardingAdvance(after seconds: TimeInterval) {
+        onboardingStepTimeoutTimer?.invalidate()
+        onboardingStepTimeoutTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.requestOnboardingAdvance()
+        }
+    }
+
+    /// True while Plato is still generating or playing the current step's spoken
+    /// line. `.responding` spans from the first audio chunk until the audio queue
+    /// drains; `isModelSpeaking` covers generation before the first chunk arrives;
+    /// the drain flag covers the tail still playing out after the model finished.
+    private var isOnboardingLineStillSpeaking: Bool {
+        voiceState == .responding
+            || openAIRealtimeClient.isModelSpeaking
+            || isWaitingForRealtimeAudioQueueDrain
+    }
+
+    /// Advances the tour, but NEVER tears a step down while its line is still
+    /// being spoken. Advancing mid-speech runs speakViaRealtimeWhenConnected,
+    /// which calls cancelResponse() and blanks realtimeResponseText — cutting the
+    /// audio and wiping the caption's tail. That is exactly why the (longest)
+    /// skills line's "…and you can add more anytime by importing a skill folder"
+    /// was spoken but never finished rendering in the bubble: the fixed timeout
+    /// fired while that line was still playing. Instead we re-check until the line
+    /// finishes, then advance — so the full line is both heard and read. The
+    /// bounded re-checks guarantee the tour can never stall if the line never
+    /// plays (e.g. the realtime session never connected). A step change cancels
+    /// these re-checks because runOnboardingStep invalidates onboardingStepTimeoutTimer.
+    private func requestOnboardingAdvance(speechCompletionChecksRemaining: Int = 30) {
+        guard guidedOnboardingStep != nil else { return }
+        if isOnboardingLineStillSpeaking && speechCompletionChecksRemaining > 0 {
+            onboardingStepTimeoutTimer?.invalidate()
+            onboardingStepTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+                self?.requestOnboardingAdvance(speechCompletionChecksRemaining: speechCompletionChecksRemaining - 1)
+            }
+            return
+        }
+        advanceOnboarding()
+    }
+
+    /// Advances the tour the moment the focus timer enters its work phase.
+    private func observeFocusTimerStartForOnboarding() {
+        onboardingFocusTimerObservation = pomodoro.$phase
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] phase in
+                guard let self, self.guidedOnboardingStep == .focusTimer else { return }
+                if phase == .work {
+                    self.advanceOnboarding()
+                }
+            }
+    }
+
+    /// Opens the panel (so the control is on screen) and flies the cursor to it.
+    private func pointCursorAtOnboardingTarget(_ target: OnboardingPointTarget, label: String) {
+        NotificationCenter.default.post(name: .platoShowPanelForOnboarding, object: nil)
+        // Give the panel a beat to open and report the control's frame, then point.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, self.guidedOnboardingStep != nil else { return }
+            guard let targetScreenRect = self.onboardingTargetScreenFrames[target] else { return }
+            let targetCenter = CGPoint(x: targetScreenRect.midX, y: targetScreenRect.midY)
+            let hostingScreen = NSScreen.screens.first { $0.frame.contains(targetCenter) } ?? NSScreen.main
+            // Set display frame + label before the location, which triggers the flight.
+            self.detectedElementDisplayFrame = hostingScreen?.frame
+            self.detectedElementBubbleText = label
+            self.detectedElementScreenLocation = targetCenter
+        }
+    }
+
+    /// Called by the panel to report a pointable control's live on-screen frame.
+    func registerOnboardingTargetFrame(_ target: OnboardingPointTarget, screenRect: CGRect) {
+        onboardingTargetScreenFrames[target] = screenRect
+    }
+
+    /// Builds the skills-step narration from the user's actually-installed skills.
+    /// Names at most the first three so the line stays short whether the user has
+    /// three skills or thirty (keeps the spoken line and matching bubble concise).
+    private func skillsStepNarration() -> String {
+        let allSkillNames = (skillManager?.installedSkills ?? []).map { $0.metadata.name }
+        if allSkillNames.isEmpty {
+            return "You can add skills by importing a skill folder. Each one teaches me a subject so I can tutor you in it."
+        }
+        let topSkillNames = Array(allSkillNames.prefix(3))
+        let nameList = naturalListSentence(from: topSkillNames)
+        if allSkillNames.count > topSkillNames.count {
+            return "Some of your skills are \(nameList), and more. Each one teaches me a subject so I can tutor you in it, and you can add more anytime by importing a skill folder."
+        }
+        return "These are your skills: \(nameList). Each one teaches me a subject so I can tutor you in it, and you can add more anytime by importing a skill folder."
+    }
+
+    /// Joins items into a spoken-style list, e.g. "A, B, and C".
+    private func naturalListSentence(from items: [String]) -> String {
+        switch items.count {
+        case 0: return ""
+        case 1: return items[0]
+        case 2: return "\(items[0]) and \(items[1])"
+        default:
+            let allButLast = items.dropLast().joined(separator: ", ")
+            return "\(allButLast), and \(items[items.count - 1])"
+        }
+    }
+
+    /// Shows a persistent instruction bubble on the cursor, typed out. Unlike the
+    /// old auto-dismissing prompt, this stays until the tour replaces or hides it.
+    private func showOnboardingBubble(_ text: String) {
+        onboardingBubbleTypeTimer?.invalidate()
+        onboardingPromptText = ""
+        showOnboardingPrompt = true
+        onboardingPromptOpacity = 0.0
+        withAnimation(.easeIn(duration: 0.3)) {
+            onboardingPromptOpacity = 1.0
+        }
+        var characterIndex = 0
+        onboardingBubbleTypeTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard characterIndex < text.count else { timer.invalidate(); return }
+            let index = text.index(text.startIndex, offsetBy: characterIndex)
+            self.onboardingPromptText.append(text[index])
+            characterIndex += 1
+        }
+    }
+
+    private func hideOnboardingBubble() {
+        onboardingBubbleTypeTimer?.invalidate()
+        onboardingBubbleTypeTimer = nil
+        withAnimation(.easeOut(duration: 0.3)) {
+            onboardingPromptOpacity = 0.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.showOnboardingPrompt = false
+            self?.onboardingPromptText = ""
+        }
+    }
+
+    /// Speaks one fixed tour line in Plato's voice. The same content is in the
+    /// bubble, so the tour still reads correctly even with no audio.
+    private func speakOnboardingLine(_ line: String) {
+        let instruction = "Say the following to the user out loud, warmly and naturally, word for word with no additions, no preamble, and do not call any tools: \"\(line)\""
+        speakViaRealtimeWhenConnected(instruction: instruction)
+    }
+
+    /// Sends a forced spoken response, waiting (best-effort) for the realtime
+    /// session to connect first. connect() can take several seconds (token +
+    /// WebSocket handshake + session.created + config); a fixed delay used to
+    /// race it and the line was silently dropped by the isConnected guard. If a
+    /// previous line is still playing it is cancelled so steps never collide with
+    /// the GA "one active response at a time" rule.
+    private func speakViaRealtimeWhenConnected(instruction: String) {
+        let speakNow: () -> Void = { [weak self] in
+            guard let self else { return }
+            if self.openAIRealtimeClient.isModelSpeaking {
+                self.openAIRealtimeClient.cancelResponse()
+            }
+            // Plato: start each forced line with an empty transcript buffer so the
+            // live caption shows only this line. Forced narration responses don't
+            // reset realtimeResponseText themselves (only user turns do, at
+            // push-to-talk start), so without this each step's transcript would
+            // append onto the previous step's.
+            self.realtimeResponseText = ""
+            self.openAIRealtimeClient.requestForcedSpokenResponse(instruction: instruction)
+        }
+
+        if openAIRealtimeClient.isConnected {
+            speakNow()
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var connectionAttemptsRemaining = 60  // 60 × 200ms ≈ 12s
+            while connectionAttemptsRemaining > 0 && !self.openAIRealtimeClient.isConnected {
+                try? await Task.sleep(for: .milliseconds(200))
+                connectionAttemptsRemaining -= 1
+            }
+            guard self.openAIRealtimeClient.isConnected else { return }
+            speakNow()
+        }
     }
 
     func tearDownOnboardingVideo() {
@@ -2296,39 +2634,6 @@ final class CompanionManager: ObservableObject {
         if let observer = onboardingVideoEndObserver {
             NotificationCenter.default.removeObserver(observer)
             onboardingVideoEndObserver = nil
-        }
-    }
-
-    private func startOnboardingPromptStream() {
-        let message = "hi, i'm plato — your research companion. hold control + option and say hello"
-        onboardingPromptText = ""
-        showOnboardingPrompt = true
-        onboardingPromptOpacity = 0.0
-
-        withAnimation(.easeIn(duration: 0.4)) {
-            onboardingPromptOpacity = 1.0
-        }
-
-        var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < message.count else {
-                timer.invalidate()
-                // Auto-dismiss after 10 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-                    guard self.showOnboardingPrompt else { return }
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        self.onboardingPromptOpacity = 0.0
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        self.showOnboardingPrompt = false
-                        self.onboardingPromptText = ""
-                    }
-                }
-                return
-            }
-            let index = message.index(message.startIndex, offsetBy: currentIndex)
-            self.onboardingPromptText.append(message[index])
-            currentIndex += 1
         }
     }
 

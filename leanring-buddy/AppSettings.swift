@@ -236,14 +236,24 @@ final class AppSettings: ObservableObject {
             : UserDefaults.standard.bool(forKey: "autoDetectLanguage")
 
         // Shortcuts
-        // MARK: - Plato — Default ctrl+option+0 (was control+option); see BuddyPushToTalkShortcut.
-        self.pushToTalkShortcut = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlOptionZero"
+        // MARK: - Plato — Default ctrl+shift+8 (was ctrl+option+0); see BuddyPushToTalkShortcut.
+        // One-time migration: earlier builds persisted an older default (control+option or
+        // ctrl+option+0), and a persisted value overrides the new default. Move those installs
+        // onto ctrl+shift+8 exactly once, then never again — so a user who later picks a
+        // different shortcut in Settings keeps their choice. (didSet does not fire in init,
+        // so the migration writes UserDefaults directly.)
+        let pushToTalkMigratedKey = "pushToTalkShortcutMigratedToControlShiftEight"
+        if !UserDefaults.standard.bool(forKey: pushToTalkMigratedKey) {
+            UserDefaults.standard.set("controlShiftEight", forKey: "pushToTalkShortcut")
+            UserDefaults.standard.set(true, forKey: pushToTalkMigratedKey)
+        }
+        self.pushToTalkShortcut = UserDefaults.standard.string(forKey: "pushToTalkShortcut") ?? "controlShiftEight"
         self.cancelKeyCode = UInt16(UserDefaults.standard.integer(forKey: "cancelKeyCode") == 0
             ? 53  // Default: Escape
             : UserDefaults.standard.integer(forKey: "cancelKeyCode"))
 
         // Voice
-        self.voiceName = UserDefaults.standard.string(forKey: "voiceName") ?? "coral"
+        self.voiceName = UserDefaults.standard.string(forKey: "voiceName") ?? "ash"
 
         // Voice Input Mode
         self.voiceInputMode = UserDefaults.standard.string(forKey: "voiceInputMode") ?? "pushToTalk"
