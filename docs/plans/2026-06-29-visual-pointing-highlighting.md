@@ -1207,7 +1207,9 @@ git commit -m "feat: highlight_text tool with async Vision OCR resolution"
 
 ## PHASE 3 — Accessibility element highlighting (the "ring the right button" feature)
 
-Delivers: a pixel-tight ring around a real app control resolved via the Accessibility API, with model-bbox as the fallback. Precise on native + Safari + woken-Electron apps; gracefully degrades on canvas/GPU apps.
+Delivers: pointing/ringing the RIGHT control by resolving it via the Accessibility API **by name** (not by the model's guessed pixels), with the model's coordinates as the fallback. This is the fix for "asked how to print, pointed to the wrong icon": the model already names the control (e.g. "Print"), so the app asks macOS for the real frame of the control *named* that and snaps there. Precise on native + Safari + woken-Electron apps; gracefully degrades (falls back to coordinates, or a verbal instruction) on canvas/GPU apps and menu-only actions.
+
+> **Why label search, not coordinate hit-testing:** snapping to whatever element sits under the model's guessed point does NOT help when the guess already landed on the wrong icon. Only resolving the control by its NAME corrects a grossly-wrong guess. Label search is therefore the primary strategy here (promoted from the original plan's "deferred follow-up").
 
 ---
 
@@ -1219,7 +1221,10 @@ Delivers: a pixel-tight ring around a real app control resolved via the Accessib
 
 **Interfaces:**
 - Consumes: `HighlightGeometry.appKitRectFromAXFrame` (Task 1).
-- Produces: `enum AXElementResolver` with `static func primaryScreenHeight() -> CGFloat`, `static func elementFrameAtAppKitPoint(_ appKitPoint: CGPoint) -> CGRect?` (returns a global AppKit rect or nil).
+- Produces: `enum AXElementResolver` (`@MainActor`) with:
+  - `static func primaryScreenHeight() -> CGFloat`
+  - `static func controlFrame(matchingLabel label: String) -> CGRect?` — **primary**: searches the frontmost app's AX tree for a pointable control whose title/description/help contains `label`; returns its global AppKit frame or nil.
+  - `static func elementFrameAtAppKitPoint(_ appKitPoint: CGPoint) -> CGRect?` — secondary hit-test.
 
 - [ ] **Step 1: Write the failing flip test**
 
@@ -1227,17 +1232,18 @@ Create `leanring-buddyTests/AXElementResolverGeometryTests.swift`:
 
 ```swift
 // MARK: - Plato
-import XCTest
+import Testing
+import CoreGraphics
 @testable import leanring_buddy
 
-final class AXElementResolverGeometryTests: XCTestCase {
+struct AXElementResolverGeometryTests {
     // The AX→AppKit flip is the unit-testable core of the resolver.
-    func testAXTopLeftFrameFlipsToAppKitBottomLeft() {
+    @Test func axTopLeftFrameFlipsToAppKitBottomLeft() {
         let rect = HighlightGeometry.appKitRectFromAXFrame(
             axOrigin: CGPoint(x: 200, y: 100), axSize: CGSize(width: 80, height: 24),
             primaryScreenHeight: 1080
         )
-        XCTAssertEqual(rect, CGRect(x: 200, y: 1080 - 100 - 24, width: 80, height: 24))
+        #expect(rect == CGRect(x: 200, y: 1080 - 100 - 24, width: 80, height: 24))
     }
 }
 ```
@@ -1258,14 +1264,21 @@ Create `leanring-buddy/AXElementResolver.swift`:
 //  leanring-buddy
 //
 //  Resolves the on-screen FRAME of a UI control via the Accessibility API so the
-//  overlay can draw a tight ring around a real button. Reads only — no clicking,
-//  no actuation (that's real-cursor-control.md, out of scope). Runs under the
-//  Accessibility grant Plato already holds (no new TCC prompt).
+//  overlay can point at / ring the REAL control instead of trusting the model's
+//  guessed pixel coordinates. Reads only — no clicking, no actuation (that's
+//  real-cursor-control.md, out of scope). Runs under the Accessibility grant
+//  Plato already holds (no new TCC prompt).
+//
+//  Two strategies:
+//   - controlFrame(matchingLabel:) — PRIMARY. Search the FRONTMOST app's AX tree
+//     for a control whose title/description matches the model's label ("Print").
+//     Robust to a grossly-wrong coordinate guess: finds the control by NAME.
+//   - elementFrameAtAppKitPoint(_:) — secondary hit-test under a point.
 //
 //  COORDINATE FACTS (verified): AX geometry is global TOP-LEFT-origin POINTS
 //  anchored to the PRIMARY screen — no backingScaleFactor. AXUIElementCopy-
 //  ElementAtPosition takes C Float (must cast). The AX API is NOT thread-safe:
-//  every call here must run on the main thread.
+//  every call runs on the main thread (this enum is @MainActor).
 //
 
 import AppKit
@@ -1281,8 +1294,52 @@ enum AXElementResolver {
             ?? 0
     }
 
-    /// Hit-tests the element under a GLOBAL AppKit point and returns its frame in
-    /// global AppKit coordinates, or nil if AX exposes nothing usable there.
+    /// PRIMARY: searches the frontmost app's AX tree for a pointable control whose
+    /// title/description/help contains `label` (case-insensitive), returning its
+    /// global AppKit frame. nil if not found or the app is AX-blind. Bounded by a
+    /// node budget + max depth; a short messaging timeout keeps a slow app from
+    /// stalling the main thread.
+    static func controlFrame(matchingLabel label: String) -> CGRect? {
+        let primaryHeight = primaryScreenHeight()
+        guard primaryHeight > 0 else { return nil }
+        let normalizedQuery = label.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedQuery.count >= 2 else { return nil }
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
+
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
+
+        let pointableRoles: Set<String> = [
+            kAXButtonRole, kAXMenuButtonRole, kAXPopUpButtonRole, kAXMenuItemRole,
+            kAXMenuBarItemRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXImageRole
+        ]
+        let titleAttributes = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute]
+        var remainingNodeBudget = 2000
+
+        func search(_ element: AXUIElement, depth: Int) -> CGRect? {
+            if remainingNodeBudget <= 0 || depth > 60 { return nil }
+            remainingNodeBudget -= 1
+
+            if let role = stringAttribute(element, kAXRoleAttribute), pointableRoles.contains(role) {
+                for attribute in titleAttributes {
+                    if let text = stringAttribute(element, attribute),
+                       text.lowercased().contains(normalizedQuery),
+                       let frame = frameOfElement(element, primaryHeight: primaryHeight) {
+                        return frame
+                    }
+                }
+            }
+            guard let children = childElements(element) else { return nil }
+            for child in children {
+                if let found = search(child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        return search(appElement, depth: 0)
+    }
+
+    /// SECONDARY: hit-tests the element under a GLOBAL AppKit point and returns its
+    /// frame in global AppKit coordinates, or nil if AX exposes nothing there.
     static func elementFrameAtAppKitPoint(_ appKitPoint: CGPoint) -> CGRect? {
         let primaryHeight = primaryScreenHeight()
         guard primaryHeight > 0 else { return nil }
@@ -1295,7 +1352,13 @@ enum AXElementResolver {
         var hitElement: AXUIElement?
         let hitStatus = AXUIElementCopyElementAtPosition(systemWide, topLeftX, topLeftY, &hitElement)
         guard hitStatus == .success, let element = hitElement else { return nil }
+        return frameOfElement(element, primaryHeight: primaryHeight)
+    }
 
+    // MARK: - AX reading helpers
+
+    /// Reads kAXPosition + kAXSize and converts to a global AppKit rect, or nil.
+    private static func frameOfElement(_ element: AXUIElement, primaryHeight: CGFloat) -> CGRect? {
         var positionValue: AnyObject?
         var sizeValue: AnyObject?
         guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
@@ -1304,7 +1367,6 @@ enum AXElementResolver {
               let sizeAXValue = sizeValue, CFGetTypeID(sizeAXValue) == AXValueGetTypeID() else {
             return nil
         }
-
         var axOrigin = CGPoint.zero
         var axSize = CGSize.zero
         guard AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &axOrigin),
@@ -1312,10 +1374,21 @@ enum AXElementResolver {
               axSize.width > 0, axSize.height > 0 else {
             return nil
         }
-
         return HighlightGeometry.appKitRectFromAXFrame(
             axOrigin: axOrigin, axSize: axSize, primaryScreenHeight: primaryHeight
         )
+    }
+
+    private static func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func childElements(_ element: AXUIElement) -> [AXUIElement]? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return nil }
+        return value as? [AXUIElement]
     }
 }
 ```
@@ -1329,70 +1402,132 @@ Expected: Build succeeds (`ApplicationServices` provides the AX symbols).
 
 ```bash
 git add leanring-buddy/AXElementResolver.swift leanring-buddyTests/AXElementResolverGeometryTests.swift
-git commit -m "feat: AXElementResolver for precise control frames (hit-test + flip)"
+git commit -m "feat: AXElementResolver — resolve controls by name (label search) + hit-test
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 10: Route control highlights through AX with model-bbox fallback
+### Task 10: Resolve pointed-at controls by name via AX (fix "pointed to the wrong icon")
+
+When the model points at an app control, prefer the REAL control frame (resolved by name via AX) over the model's guessed pixels — and ring it. This is the fix for the observed "asked how to print → pointed to the wrong icon": the cursor + ring snap to the actual named control, or fall back to the model's coordinates when AX can't resolve it.
 
 **Files:**
-- Modify: `leanring-buddy/CompanionManager.swift` (extend `applyHighlightRegionDirective`)
+- Modify: `leanring-buddy/CompanionManager.swift` (the pointing path + `applyHighlightRegionDirective`)
+- Modify: `leanring-buddy/OpenAIRealtimeClient.swift` (`highlight_region` `snap_to_control` param)
+- Modify: `leanring-buddy/SkillPromptComposer.swift` (control-label guidance)
 
 **Interfaces:**
-- Consumes: `AXElementResolver.elementFrameAtAppKitPoint` (Task 9), the existing `mapScreenshotPixelCoordinateToGlobalScreenPoint`.
+- Consumes: `AXElementResolver.controlFrame(matchingLabel:)` + `elementFrameAtAppKitPoint` (Task 9), `addHighlight`, `PlatoHighlight`, the existing pointing fields + `mapScreenshotPixelCoordinateToGlobalScreenPoint`.
+- Produces: `resolveControlGlobalFrame(label:approximatePoint:) -> CGRect?`.
 
-- [ ] **Step 1: Add an AX-snap option to `highlight_region`**
+- [ ] **Step 1: Add the shared resolver helper**
 
-First add a `snap_to_control` boolean to the `highlightRegionTool` parameters (Task 4) in `OpenAIRealtimeClient.swift`:
+In `CompanionManager.swift`, next to the pointing handlers (after `applyPointDirectiveFromToolCall`), add:
 
 ```swift
-                    "snap_to_control": ["type": "boolean", "description": "Set true when highlighting a single UI control (button, menu, icon) so the ring snaps exactly to the control. Leave false/omit for a free area like a paper region."],
+    // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
+    // over the model's guessed pixels. nil → caller falls back to model coordinates.
+    private func resolveControlGlobalFrame(label: String, approximatePoint: CGPoint) -> CGRect? {
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedLabel.isEmpty, let frameByName = AXElementResolver.controlFrame(matchingLabel: trimmedLabel) {
+            return frameByName
+        }
+        // Secondary: the element directly under the model's guessed point (only
+        // helps when the guess already landed on the right control).
+        return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint)
+    }
 ```
 
-- [ ] **Step 2: Use AX to snap the frame when requested**
+- [ ] **Step 2: Use it in the tool-call pointing path**
 
-In `applyHighlightRegionDirective` (Task 5), after computing `globalFrame` and before building `kind`, insert:
+In `applyPointDirectiveFromToolCall`, the tail currently maps the model's pixels to `screenLocation` and assigns the detected-element fields. Replace that tail (the `let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(...)` block through the `SkillyAnalytics.trackElementPointed(...)` line) with:
 
 ```swift
-        // MARK: - Plato — snap to the real control frame via Accessibility
-        var resolvedGlobalFrame = globalFrame
-        var resolvedKind: PlatoHighlight.Kind
-        let shouldSnapToControl = (arguments["snap_to_control"] as? Bool) ?? false
-        if shouldSnapToControl {
+        let modelPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+            screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
+            screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
+            screenCapture: targetScreenCapture
+        )
+
+        // MARK: - Plato — prefer the real control frame (by name) over guessed pixels
+        if let controlFrame = resolveControlGlobalFrame(
+            label: parsedPointDirective.elementLabel, approximatePoint: modelPoint
+        ) {
+            detectedElementScreenLocation = CGPoint(x: controlFrame.midX, y: controlFrame.midY)
+            detectedElementDisplayFrame = targetScreenCapture.displayFrame
+            detectedElementBubbleText = parsedPointDirective.elementLabel
+            addHighlight(PlatoHighlight(
+                kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
+                globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
+                createdAt: Date(), timeToLive: 4.0))
+            SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+            return
+        }
+
+        // Fallback: the model's guessed coordinates (previous behavior).
+        detectedElementScreenLocation = modelPoint
+        detectedElementDisplayFrame = targetScreenCapture.displayFrame
+        detectedElementBubbleText = parsedPointDirective.elementLabel
+        SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+```
+
+> The legacy inline-tag path (`applyPointDirectiveIfPresent`) keeps its existing coordinate behavior — the tool path is what gpt-realtime uses. (Optionally apply the same AX preference there later.)
+
+- [ ] **Step 3: Add `snap_to_control` to `highlight_region` and use AX**
+
+In `OpenAIRealtimeClient.swift`, add to the `highlightRegionTool` parameters:
+
+```swift
+                    "snap_to_control": ["type": "boolean", "description": "Set true when highlighting a single UI control (button, menu, icon) so the ring snaps to the real control via Accessibility. Omit/false for a free area like a paper region."],
+```
+
+In `applyHighlightRegionDirective`, after computing `globalFrame` and before building `kind`, insert:
+
+```swift
+        // MARK: - Plato — snap a single control to its real AX frame (by name, then point)
+        if (arguments["snap_to_control"] as? Bool) ?? false {
             let centerPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
                 screenshotXInPixels: x + (width / 2),
                 screenshotYInPixels: y + (height / 2),
                 screenCapture: targetScreenCapture
             )
-            if let axFrame = AXElementResolver.elementFrameAtAppKitPoint(centerPoint) {
-                resolvedGlobalFrame = axFrame
-                // A snapped control reads best as a crisp ring.
-                resolvedKind = .strokedRegion(color: PlatoHighlight.color(forName: colorName), lineWidth: 2.5)
-                addHighlight(PlatoHighlight(kind: resolvedKind, globalFrame: resolvedGlobalFrame,
-                                            label: label, createdAt: Date(), timeToLive: 4.0))
+            if let axFrame = resolveControlGlobalFrame(label: label ?? "", approximatePoint: centerPoint) {
+                addHighlight(PlatoHighlight(
+                    kind: .strokedRegion(color: PlatoHighlight.color(forName: colorName), lineWidth: 2.5),
+                    globalFrame: axFrame, label: label, createdAt: Date(), timeToLive: 4.0))
                 return
             }
-            // AX exposed nothing (canvas/GPU app, or no element) — fall through to
-            // the model bounding box below.
+            // AX couldn't resolve (canvas/GPU app, no element) — fall through to the model bbox.
         }
 ```
 
-Then leave the existing `kind`/`addHighlight` lines as the fallback (they already use `globalFrame`).
+(The existing `kind`/`addHighlight` lines remain as the model-bbox fallback.)
 
-- [ ] **Step 3: Build, run, and verify on a native control**
+- [ ] **Step 4: Steer the prompt — accurate label, verbal fallback for menus**
 
-Developer action: ⌘R. In a native app (Finder, Mail, Xcode), push-to-talk: *"Ring the New Folder button."* (the model should pass `snap_to_control: true`).
-Expected: A tight ring snaps exactly to the button's frame (not just near it). In a canvas app (e.g. a drawing app) the same request falls back to the model's looser rectangle without error.
+In `SkillPromptComposer.pointingModeInstruction`, extend `highlightGuidance` (append one sentence):
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add leanring-buddy/OpenAIRealtimeClient.swift leanring-buddy/CompanionManager.swift
-git commit -m "feat: snap control highlights to real AX element frames, model-bbox fallback"
+```
+" When you point at an app control (a button, menu, or icon), give its exact on-screen NAME as the label — Plato uses that name to find and ring the real control precisely. If the action lives only in a menu (e.g. File ▸ Print) with no on-screen button, do NOT point at a guess — say the menu path out loud instead."
 ```
 
-> **Deferred within Phase 3 (optional follow-ups, not blocking):** label-based AX tree search (resolve "the Export button" with no coordinates) and Electron wake (`AXManualAccessibility`) for VS Code/Slack. Add these as separate tasks if the hit-test-at-center path proves insufficient; the spec (§3b-ii) has the DFS sketch and the wake caveats.
+- [ ] **Step 5: Build, run, verify (the regression that motivated this)**
+
+Developer action: ⌘R. In the app where "how to print" previously mispointed, ask *"how do I print this?"* and *"where's the share button?"*.
+Expected: the cursor + a tight ring land on the REAL control (resolved by name), not a guessed icon. If the action is menu-only, the companion describes the menu path instead of pointing at the wrong place. In an AX-blind app (canvas/GPU) it falls back to the model's approximate point without error.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add leanring-buddy/CompanionManager.swift leanring-buddy/OpenAIRealtimeClient.swift leanring-buddy/SkillPromptComposer.swift
+git commit -m "feat: resolve pointed-at controls by name via AX (fix wrong-icon pointing)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+> **Deferred (optional follow-ups):** Electron wake (`AXManualAccessibility`) for VS Code/Slack chrome, and ranking multiple label matches by proximity to the model's point (v1 returns the first role+name match). The spec (§3b-ii) has the wake caveats.
 
 ---
 
