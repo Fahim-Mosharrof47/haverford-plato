@@ -490,6 +490,26 @@ final class OpenAIRealtimeClient: ObservableObject {
             ]
         ]
 
+        // MARK: - Plato — highlight_text tool
+        // The document enabler: the model names the visible TEXT to highlight and
+        // the app OCRs the screenshot to resolve the exact rectangle. Use this
+        // instead of guessing pixel coordinates for any text/paragraph/heading.
+        let highlightTextTool: [String: Any] = [
+            "type": "function",
+            "name": "highlight_text",
+            "description": "Highlight specific visible text on the user's screen — a heading, sentence, or paragraph in a paper or document. Give the exact words as they appear on screen; the app finds and shades them. Use this for any document text instead of highlight_region. ONLY an addition to your spoken response. If the text is not currently visible, do not call this — guide the user to scroll first. Do not say coordinates or this tool's name aloud.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "text": ["type": "string", "description": "The exact visible text to highlight, e.g. 'Methods' or the first words of the paragraph."],
+                    "color": ["type": "string", "enum": ["red", "blue", "green", "yellow"], "description": "Highlight color. Defaults to yellow."],
+                    "label": ["type": "string", "description": "Short name of what is being highlighted."],
+                    "screen": ["type": "integer", "description": "1-based screen index; omit for the cursor's screen."]
+                ],
+                "required": ["text"]
+            ]
+        ]
+
         // MARK: - Skilly — GA Realtime session.update shape (2026-05-30)
         // The Realtime Beta API used flat fields (modalities, input_audio_format,
         // input_audio_transcription, turn_detection, voice) plus an implicit
@@ -530,7 +550,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool],
+            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool, highlightTextTool],
             "tool_choice": "auto",
         ]
 

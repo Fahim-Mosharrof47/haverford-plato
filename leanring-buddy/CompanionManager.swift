@@ -1761,6 +1761,46 @@ final class CompanionManager: ObservableObject {
                                     createdAt: Date(), timeToLive: 4.0))
     }
 
+    // MARK: - Plato — highlight_text handler (async OCR)
+    private func applyHighlightTextDirective(argumentsJSON: String) {
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let searchText = (arguments["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !searchText.isEmpty else {
+            return
+        }
+        let colorName = (arguments["color"] as? String) ?? "yellow"
+        let label = (arguments["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oneBasedScreenNumber = integerValue(from: arguments["screen"])
+
+        let resolverDirective = ParsedPointDirective(
+            screenshotXInPixels: 0, screenshotYInPixels: 0,
+            elementLabel: label ?? searchText, oneBasedScreenNumber: oneBasedScreenNumber
+        )
+        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+
+        // Snapshot the value-type bits we need off the main actor.
+        let jpegData = targetScreenCapture.imageData
+        let displayFrame = targetScreenCapture.displayFrame
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let cgImage = NSBitmapImageRep(data: jpegData)?.cgImage else { return }
+            let recognizedLines = (try? ScreenshotTextRecognizer.recognizeText(in: cgImage)) ?? []
+            guard let normalizedBox = ScreenshotTextMatcher.bestMatchBoundingBox(for: searchText, in: recognizedLines) else {
+                // No confident match — do nothing (the model already spoke; never
+                // shade the wrong paragraph). A future enhancement can speak a fallback.
+                return
+            }
+            let globalFrame = HighlightGeometry.globalRectFromNormalizedVisionBox(normalizedBox, displayFrame: displayFrame)
+            await MainActor.run {
+                self?.addHighlight(PlatoHighlight(
+                    kind: .filledRegion(color: PlatoHighlight.color(forName: colorName)),
+                    globalFrame: globalFrame, label: label,
+                    createdAt: Date(), timeToLive: 5.0
+                ))
+            }
+        }
+    }
+
     private func parsePointDirective(from responseText: String) -> ParsedPointDirective? {
         guard let regularExpression = try? NSRegularExpression(pattern: #"\[POINT:([^\]]+)\]"#) else {
             return nil
@@ -2301,6 +2341,10 @@ final class CompanionManager: ObservableObject {
                 openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             case "ripple_here":
                 applyRippleDirective(argumentsJSON: argumentsJSON)
+                didReceivePointToolCallForCurrentTurn = true
+                openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+            case "highlight_text":
+                applyHighlightTextDirective(argumentsJSON: argumentsJSON)
                 didReceivePointToolCallForCurrentTurn = true
                 openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             default:
