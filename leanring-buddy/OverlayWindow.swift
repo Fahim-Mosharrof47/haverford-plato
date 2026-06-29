@@ -346,6 +346,11 @@ struct BlueCursorView: View {
                     .accessibilityValue(navigationBubbleText)
             }
 
+            // MARK: - Plato — Visual highlight layer
+            ForEach(companionManager.activeHighlights.filter { highlightBelongsOnThisScreen($0) }) { highlight in
+                PlatoHighlightView(highlight: highlight, screenFrame: screenFrame)
+            }
+
             // Blue triangle cursor — shown when idle or while TTS is playing (responding).
             // All three states (triangle, waveform, spinner) stay in the view tree
             // permanently and cross-fade via opacity so SwiftUI doesn't remove/re-insert
@@ -521,6 +526,13 @@ struct BlueCursorView: View {
         let x = screenPoint.x - screenFrame.origin.x
         let y = (screenFrame.origin.y + screenFrame.height) - screenPoint.y
         return CGPoint(x: x, y: y)
+    }
+
+    // MARK: - Plato
+    /// Only draw a highlight on the overlay window whose screen contains the
+    /// highlight's center (matches the cursor's per-screen filter at :444-459).
+    private func highlightBelongsOnThisScreen(_ highlight: PlatoHighlight) -> Bool {
+        screenFrame.contains(CGPoint(x: highlight.globalFrame.midX, y: highlight.globalFrame.midY))
     }
 
     // MARK: - Element Navigation
