@@ -1682,6 +1682,85 @@ final class CompanionManager: ObservableObject {
         SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
     }
 
+    // MARK: - Plato — Tool argument decoding helpers (shared by highlight tools)
+    private func decodeToolArguments(_ argumentsJSON: String) -> [String: Any]? {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    /// Accepts Int or Double (the model sometimes emits 12.0 for an integer field).
+    private func integerValue(from value: Any?) -> Int? {
+        if let intValue = value as? Int { return intValue }
+        if let doubleValue = value as? Double { return Int(doubleValue) }
+        return nil
+    }
+
+    // MARK: - Plato — highlight_region handler
+    private func applyHighlightRegionDirective(argumentsJSON: String) {
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let x = integerValue(from: arguments["x"]),
+              let y = integerValue(from: arguments["y"]),
+              let width = integerValue(from: arguments["width"]),
+              let height = integerValue(from: arguments["height"]) else {
+            return
+        }
+        let colorName = arguments["color"] as? String
+        let style = (arguments["style"] as? String) ?? "filled"
+        let label = (arguments["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oneBasedScreenNumber = integerValue(from: arguments["screen"])
+
+        // Reuse the pointing resolver, which only reads oneBasedScreenNumber.
+        let resolverDirective = ParsedPointDirective(
+            screenshotXInPixels: x, screenshotYInPixels: y,
+            elementLabel: label ?? "", oneBasedScreenNumber: oneBasedScreenNumber
+        )
+        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+
+        let globalFrame = HighlightGeometry.globalRectFromScreenshotPixelRect(
+            x: x, y: y, width: width, height: height,
+            screenshotWidthInPixels: targetScreenCapture.screenshotWidthInPixels,
+            screenshotHeightInPixels: targetScreenCapture.screenshotHeightInPixels,
+            displayFrame: targetScreenCapture.displayFrame
+        )
+
+        let highlightColor = PlatoHighlight.color(forName: colorName)
+        let kind: PlatoHighlight.Kind = (style == "outline")
+            ? .strokedRegion(color: highlightColor, lineWidth: 2.5)
+            : .filledRegion(color: highlightColor)
+
+        addHighlight(PlatoHighlight(kind: kind, globalFrame: globalFrame,
+                                    label: label, createdAt: Date(), timeToLive: 4.0))
+    }
+
+    // MARK: - Plato — ripple_here handler
+    private func applyRippleDirective(argumentsJSON: String) {
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let x = integerValue(from: arguments["x"]),
+              let y = integerValue(from: arguments["y"]) else {
+            return
+        }
+        let label = (arguments["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oneBasedScreenNumber = integerValue(from: arguments["screen"])
+
+        let resolverDirective = ParsedPointDirective(
+            screenshotXInPixels: x, screenshotYInPixels: y,
+            elementLabel: label ?? "", oneBasedScreenNumber: oneBasedScreenNumber
+        )
+        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+
+        let globalPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+            screenshotXInPixels: x, screenshotYInPixels: y, screenCapture: targetScreenCapture
+        )
+        // Zero-size rect: the ripple view centers on its midpoint.
+        let globalFrame = CGRect(x: globalPoint.x, y: globalPoint.y, width: 0, height: 0)
+        addHighlight(PlatoHighlight(kind: .ripplePulse(color: PlatoHighlight.color(forName: "blue")),
+                                    globalFrame: globalFrame, label: label,
+                                    createdAt: Date(), timeToLive: 4.0))
+    }
+
     private func parsePointDirective(from responseText: String) -> ParsedPointDirective? {
         guard let regularExpression = try? NSRegularExpression(pattern: #"\[POINT:([^\]]+)\]"#) else {
             return nil
@@ -2212,6 +2291,18 @@ final class CompanionManager: ObservableObject {
                 handleScholarToolCall(argumentsJSON: argumentsJSON, callId: callId)
             case "control_pomodoro":
                 handlePomodoroToolCall(argumentsJSON: argumentsJSON, callId: callId)
+            case "highlight_region":
+                applyHighlightRegionDirective(argumentsJSON: argumentsJSON)
+                // Reuse the point_at_element follow-up safety net: marks that a
+                // visual tool fired (so the inline-tag fallback is skipped and a
+                // tool-only response still triggers a forced spoken follow-up),
+                // and closes THIS call now without eliciting a new response.
+                didReceivePointToolCallForCurrentTurn = true
+                openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+            case "ripple_here":
+                applyRippleDirective(argumentsJSON: argumentsJSON)
+                didReceivePointToolCallForCurrentTurn = true
+                openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             default:
                 #if DEBUG
                 print("[CompanionManager] Unknown tool call '\(name)' — closing with error output")
