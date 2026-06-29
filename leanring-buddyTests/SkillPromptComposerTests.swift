@@ -143,6 +143,18 @@ struct SkillPromptComposerTests {
         #expect(firstComposedPrompt == secondComposedPrompt)
     }
 
+    // MARK: - Plato
+    @Test func composedPromptIncludesHighlightGuidance() throws {
+        let (skill, progress) = try makeSkillAndProgress()
+        let composedPrompt = SkillPromptComposer.compose(
+            basePrompt: basePrompt,
+            skill: skill,
+            progress: progress
+        )
+        #expect(composedPrompt.contains("highlight_region"))
+        #expect(composedPrompt.contains("ripple_here"))
+    }
+
     // MARK: Test 8
 
     @Test func promptCacheInvalidatesOnStageChange() throws {

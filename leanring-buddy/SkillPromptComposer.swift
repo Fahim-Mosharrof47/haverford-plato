@@ -203,13 +203,16 @@ enum SkillPromptComposer {
 
     /// Returns the pointing-mode instruction sentence appropriate for the given mode and target app.
     private static func pointingModeInstruction(mode: PointingMode, targetApp: String) -> String {
+        // MARK: - Plato
+        let highlightGuidance = " Beyond pointing, you can emphasize regions visually. To highlight a region of a document or paper for the user to study or include, call highlight_region (or, once you know the exact visible text, highlight_text). To draw the eye to a single click target, call ripple_here. If the thing the user needs is scrolled off-screen, call show_scroll_affordance with the direction and tell them to scroll; highlight it once it becomes visible. Every highlight only ever ADDS to your spoken answer — always speak normally too. Highlights are momentary; never rely on them persisting. Never say coordinates, colors-as-data, or tool names aloud."
+
         switch mode {
         case .always:
-            return "When helping with \(targetApp), aggressively point at UI elements using the vocabulary above. The user is learning and needs visual guidance. Err on the side of pointing rather than not pointing."
+            return "When helping with \(targetApp), aggressively point at UI elements using the vocabulary above. The user is learning and needs visual guidance. Err on the side of pointing rather than not pointing." + highlightGuidance
         case .whenRelevant:
-            return "When helping with \(targetApp), point at UI elements when it would genuinely help the user find something they're looking for. Don't point at things that are obvious or that the user is already looking at."
+            return "When helping with \(targetApp), point at UI elements when it would genuinely help the user find something they're looking for. Don't point at things that are obvious or that the user is already looking at." + highlightGuidance
         case .minimal:
-            return "When helping with \(targetApp), only point at UI elements when the user explicitly asks where something is or is clearly lost. Default to verbal descriptions unless pointing adds significant clarity."
+            return "When helping with \(targetApp), only point at UI elements when the user explicitly asks where something is or is clearly lost. Default to verbal descriptions unless pointing adds significant clarity." + highlightGuidance
         }
     }
 

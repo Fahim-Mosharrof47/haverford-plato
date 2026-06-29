@@ -254,9 +254,11 @@ enum SkillValidation {
             })
 
             let lowercasedVocabularyName = vocabularyEntry.name.lowercased()
-            if lowercasedVocabularyName.contains("[point:") {
+            // MARK: - Plato — also ban the highlight directive tags
+            let bannedDirectiveTags = ["[point:", "[highlight:", "[ripple:", "[scroll:", "[spotlight:"]
+            for bannedTag in bannedDirectiveTags where lowercasedVocabularyName.contains(bannedTag) {
                 violations.append(
-                    "Vocabulary entry '\(escapedVocabularyName)' name: contains [POINT: tag pattern, which is not allowed"
+                    "Vocabulary entry '\(escapedVocabularyName)' name: contains \(bannedTag.uppercased()) tag pattern, which is not allowed"
                 )
             }
 
