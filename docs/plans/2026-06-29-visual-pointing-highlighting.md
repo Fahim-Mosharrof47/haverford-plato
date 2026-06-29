@@ -24,7 +24,8 @@
 
 The implementer **cannot compile or run the app** (no `xcodebuild`; TCC). Therefore:
 
-- **Pure-logic steps** ship as real `XCTest` cases in `leanring-buddyTests/`. At each `[verify-test]` step, the **developer runs the test target in Xcode (⌘U)**. "Expected: PASS/FAIL" means the developer confirms the result in Xcode's test navigator.
+- **Test framework:** the codebase uses **Swift Testing** (`import Testing` / `@Test` / `#expect`), not XCTest. The XCTest-style snippets in the tasks below are illustrative — **write the tests as Swift Testing** (`struct …Tests { @Test func … { #expect(a == b) } }`, `#expect(x == nil)` for nil checks). Add `import CoreGraphics` where `CGRect`/`CGPoint` are used.
+- **Pure-logic steps** ship as real Swift Testing cases in `leanring-buddyTests/`. At each `[verify-test]` step, the **developer runs the test target in Xcode (⌘U)**. "Expected: PASS/FAIL" means the developer confirms the result in Xcode's test navigator.
 - **UI / system-integration steps** are verified by **build & run (⌘R)** plus the described manual observation. "Expected:" describes exactly what the developer should see on screen.
 - **Every code step shows the full code.** The implementer writes the code; a checkpoint review + the developer's Xcode run together close each task.
 
