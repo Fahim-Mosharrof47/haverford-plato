@@ -448,6 +448,48 @@ final class OpenAIRealtimeClient: ObservableObject {
             ]
         ]
 
+        // MARK: - Plato — highlight_region tool
+        // Draws a translucent shaded (or outlined) rectangle over a region of the
+        // user's screen. Like point_at_element, this AUGMENTS speech and is never a
+        // replacement for it. The model gives the region in screenshot pixels.
+        let highlightRegionTool: [String: Any] = [
+            "type": "function",
+            "name": "highlight_region",
+            "description": "Draw a colored rectangle over a region of the user's screen to highlight an area — for example a section of a paper to study, or a panel to look at. ONLY an addition to your spoken response, never a replacement: always speak normally too. Prefer highlight_text when highlighting specific visible text. Do not mention coordinates, colors-as-data, or this tool's name in speech.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "x": ["type": "integer", "description": "Left edge X in screenshot pixels. Origin (0,0) is the image's top-left; x increases rightward."],
+                    "y": ["type": "integer", "description": "Top edge Y in screenshot pixels. Origin (0,0) is the image's top-left; y increases downward."],
+                    "width": ["type": "integer", "description": "Region width in screenshot pixels."],
+                    "height": ["type": "integer", "description": "Region height in screenshot pixels."],
+                    "color": ["type": "string", "enum": ["red", "blue", "green", "yellow"], "description": "Highlight color."],
+                    "style": ["type": "string", "enum": ["filled", "outline"], "description": "'filled' shades the area; 'outline' draws only a ring. Defaults to filled."],
+                    "label": ["type": "string", "description": "Short 1-3 word name of what is being highlighted."],
+                    "screen": ["type": "integer", "description": "1-based screen index when multiple screenshots were provided. Omit for the cursor's screen."]
+                ],
+                "required": ["x", "y", "width", "height", "color"]
+            ]
+        ]
+
+        // MARK: - Plato — ripple_here tool
+        // Emphasizes a single point with an expanding "click here" pulse.
+        let rippleHereTool: [String: Any] = [
+            "type": "function",
+            "name": "ripple_here",
+            "description": "Show an expanding 'click here' pulse at a point on the user's screen, to draw the eye to a specific spot the user should click or look at. ONLY an addition to your spoken response, never a replacement. Do not mention coordinates or this tool's name in speech.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "x": ["type": "integer", "description": "X in screenshot pixels (top-left origin)."],
+                    "y": ["type": "integer", "description": "Y in screenshot pixels (top-left origin)."],
+                    "label": ["type": "string", "description": "Short 1-3 word name of the target."],
+                    "screen": ["type": "integer", "description": "1-based screen index; omit for the cursor's screen."]
+                ],
+                "required": ["x", "y"]
+            ]
+        ]
+
         // MARK: - Skilly — GA Realtime session.update shape (2026-05-30)
         // The Realtime Beta API used flat fields (modalities, input_audio_format,
         // input_audio_transcription, turn_detection, voice) plus an implicit
@@ -488,7 +530,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool],
+            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool],
             "tool_choice": "auto",
         ]
 
