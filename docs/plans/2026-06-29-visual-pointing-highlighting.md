@@ -4,7 +4,7 @@
 
 **Goal:** Give Plato's overlay the ability to *highlight* things on screen — translucent shaded rectangles, a "click here" ripple pulse, a scroll/arrow affordance, and a spotlight/dim mask — driven by the model so it can highlight a paper section to study, ring the right button in unfamiliar software, and guide the user to scroll to off-screen content.
 
-**Architecture:** Plato already hosts a full-screen, click-through, per-screen `NSWindow` with a SwiftUI cursor view and a function-call pointing pipeline (`point_at_element`). This feature is **purely additive**: a new `activeHighlights` collection on `CompanionManager`, new SwiftUI shape views in the existing overlay, three localization strategies that all end at one global-AppKit `CGRect` (model bounding-box → OCR text resolution → Accessibility element frame), and new Realtime tools that mirror the `point_at_element` mechanism. **No new windows, no new permissions, no clicking or cursor control** (actuation is covered separately in `docs/research/real-cursor-control.md` and is out of scope here).
+**Architecture:** Plato already hosts a full-screen, click-through, per-screen `NSWindow` with a SwiftUI cursor view and a function-call pointing pipeline (`point_at_element`). This feature is **purely additive**: a new `activeHighlights` collection on `CompanionManager`, new SwiftUI shape views in the existing overlay, three localization strategies that all end at one global-AppKit `CGRect` (model bounding-box → OCR text resolution → Accessibility element frame), and new Realtime tools that mirror the `point_at_element` mechanism. **No new windows, no new permissions, no clicking or cursor control** — actuation (clicking / moving the real cursor) is a deliberate non-goal: Plato is purely a teaching companion that points and highlights.
 
 **Tech Stack:** Swift 6 / SwiftUI / AppKit (`NSWindow`, `NSHostingView`), the OpenAI Realtime function-call protocol, Apple's **Vision** framework (`VNRecognizeTextRequest`, macOS 14.2 classic API), the **Accessibility** API (`AXUIElement…`), and the existing ScreenCaptureKit capture pipeline. Reference spec: `docs/research/visual-pointing-highlighting.md`.
 
@@ -1265,8 +1265,8 @@ Create `leanring-buddy/AXElementResolver.swift`:
 //
 //  Resolves the on-screen FRAME of a UI control via the Accessibility API so the
 //  overlay can point at / ring the REAL control instead of trusting the model's
-//  guessed pixel coordinates. Reads only — no clicking, no actuation (that's
-//  real-cursor-control.md, out of scope). Runs under the Accessibility grant
+//  guessed pixel coordinates. Reads only — no clicking, no actuation: Plato is a
+//  teaching companion that points and highlights only. Runs under the Accessibility grant
 //  Plato already holds (no new TCC prompt).
 //
 //  Two strategies:
@@ -1782,7 +1782,7 @@ git commit -m "feat: auto-dismiss highlights on first scroll/mouse-down"
 
 ## Out of scope / deliberate non-goals
 
-- **Clicking, cursor warping, AX press, scrolling for the user** — actuation lives in `docs/research/real-cursor-control.md`. This feature only points and highlights.
+- **Clicking, cursor warping, AX press, scrolling for the user** — actuation is a deliberate non-goal. Plato never clicks, presses, or moves the real cursor; it only points and highlights so the *user* performs the action.
 - **Reading another app's document model** (PDFKit is in-process only). Document awareness comes from the screenshot + OCR.
 - **Label-based AX tree search and Electron wake** — deferred follow-ups within Phase 3 (spec §3b-ii).
 - **Higher-resolution OCR-only capture** — the MVP OCRs the existing 1280px JPEG (Open Question #1).
@@ -1794,7 +1794,7 @@ git commit -m "feat: auto-dismiss highlights on first scroll/mouse-down"
 2. **OCR resolution tension:** 1280px hurts small dense paper fonts. If Phase 2 accuracy is poor, add a higher-res cursor-screen capture used only for OCR.
 3. **`highlight_text` mis-match risk:** repeated phrases, equations/figures, hyphenation. Consider a confidence floor below which the model says "I can't pinpoint that."
 4. **Spotlight compositing cost** on multi-monitor Retina (Task 12 Step 4).
-5. **Shared `AXElementResolver` ownership** if `real-cursor-control.md` also ships — keep one copy (this plan reads frames; that one also acts).
+5. **`AXElementResolver` ownership** — this plan owns the resolver; it reads frames only and never acts (no clicking / cursor control).
 6. **Color accessibility** — every highlight already pairs hue with an outline + label; keep that invariant.
 
 ## Self-review notes

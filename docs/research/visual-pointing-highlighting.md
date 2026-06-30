@@ -3,7 +3,7 @@
 **Date:** 2026-06-29
 **Question:** How do we let Plato's overlay cursor *highlight* things on screen — translucent colored rectangles, a "click here" ripple pulse, scroll/arrow affordances, a spotlight/dim mask — to (1) highlight a section of a research paper to study/include and tell the user to scroll to it, and (2) point a user at the right button in software they don't know?
 
-**Scope:** This is the **visual / highlighting layer only**. Pointing and highlighting — *not* moving the real cursor, *not* clicking, *not* performing actions. The actuation side (warping the real cursor, synthetic clicks, AX press) is covered separately in [`real-cursor-control.md`](./real-cursor-control.md) and is **explicitly out of scope here**; this doc references it where the two intersect but does not duplicate it.
+**Scope:** This is the **visual / highlighting layer only**. Pointing and highlighting — *not* moving the real cursor, *not* clicking, *not* performing actions. Actuation (warping the real cursor, synthetic clicks, AX press) is a **deliberate non-goal**: Plato is purely a teaching companion that shows the user *where* and lets the *user* act.
 
 ---
 
@@ -18,17 +18,9 @@
 4. **"Scroll to a section" is a voice-guided, re-capture-until-visible loop — not a programmatic scroll.** Plato cannot read another app's document structure (PDFKit is in-process only) and cannot (by scope) scroll for the user. It instructs, shows a directional affordance, re-captures, and highlights once the target text becomes visible via OCR.
 5. **Highlights must be momentary, not persistent.** An absolute-screen-coordinate box goes stale the instant the user scrolls/resizes/moves a window. The existing pointer already commits to this (fly → hold ~3s → clear). Box highlights should match: time-boxed TTL, re-anchored per turn, auto-dismissed on first scroll/mouse-down.
 
-### How this complements `real-cursor-control.md`
+### Why actuation is excluded
 
-| | `real-cursor-control.md` (out of scope here) | This doc (visual-pointing-highlighting.md) |
-|---|---|---|
-| Goal | Act *for* the user | Show the user *where* |
-| Primitive | `CGWarpMouseCursorPosition`, `CGEvent.post`, `AXUIElementPerformAction(kAXPressAction)` | SwiftUI shapes in the overlay |
-| Touches real cursor / clicks | Yes | **Never** |
-| New permission risk | Possibly (event posting) | **None** beyond grants already held |
-| Shared machinery | AX element-frame read; AppKit↔CG coordinate flips; `OverlayWindow` | AX element-frame read; same coordinate chain; same `OverlayWindow` |
-
-The two docs share the **AX element-frame resolution** code and the **`OverlayWindow`** host. If both ship, factor the AX resolver into one file (`AXElementResolver.swift`) consumed by both. This doc owns the *drawing*; that doc owns the *acting*.
+Plato shows the user *where* — it never acts *for* the user. It uses only SwiftUI shapes drawn in the existing click-through `OverlayWindow` and never touches the real cursor or synthesizes clicks, so it needs **no permissions beyond the grants already held**. Cursor warping, synthetic clicks, and AX press (`CGWarpMouseCursorPosition`, `CGEvent.post`, `AXUIElementPerformAction(kAXPressAction)`) are a deliberate non-goal and are not pursued. The `AXElementResolver.swift` introduced here reads element frames only.
 
 ---
 
@@ -419,7 +411,7 @@ Because Plato can't scroll for the user (out of scope) and can't see off-screen 
 4. **"Now visible" = OCR finds the heading** (normalized, allow section-number prefixes like "3. Methods") → box → momentary highlight.
 5. **Not found after the window → say "keep scrolling," never point speculatively.**
 
-> **Out of scope (mention only):** `AXUIElementPerformAction(el, kAXScrollToVisibleAction)` and setting `kAXSelectedTextRange` can scroll an app to an element — but that's *actuation*, excluded here, and unavailable for Preview PDFs anyway. See `real-cursor-control.md`.
+> **Out of scope (mention only):** `AXUIElementPerformAction(el, kAXScrollToVisibleAction)` and setting `kAXSelectedTextRange` can scroll an app to an element — but that's *actuation*, a deliberate non-goal, and unavailable for Preview PDFs anyway.
 
 ### Staleness — momentary, not persistent
 
@@ -530,7 +522,7 @@ Scale aggressiveness by `pointingMode` exactly as the existing pointing layer do
 | Highlight state collection + expiry timer | ❌ | **Build** — `activeHighlights: [PlatoHighlight]` |
 | Model bounding-box region tag (w,h) | ❌ | **Build** (§3b-i) — cheap, imprecise |
 | Vision-framework OCR text→rect resolver | ❌ | **Build** (§3b-iii) — the paper enabler; `import Vision` |
-| AX element-frame resolver (hit-test + label search) | ❌ | **Build** (§3b-ii) — share with `real-cursor-control.md` |
+| AX element-frame resolver (hit-test + label search) | ❌ | **Build** (§3b-ii) |
 | Electron AX wake (`AXManualAccessibility`) | ❌ | **Build** — for VS Code/Slack/etc. controls |
 | Scroll-to-section guide loop (re-capture + OCR detect) | ❌ | **Build** (§4) |
 | Scroll/mouse-down auto-dismiss monitor | ❌ | **Build** (§4 B4) |
@@ -559,7 +551,7 @@ All Plato additions marked `// MARK: - Plato` per repo convention; `import Combi
 - `PlatoHighlight.swift` — `PlatoHighlight` value type + `Kind`/`ArrowDirection` enums.
 - `PlatoHighlightView.swift` — the shape views (`filledRegion`/`strokedRegion`/`ripplePulse`/`directionalArrow`/`spotlight`), `ArrowShape`, `SpotlightMask`, global→local rect conversion. *(New `leanring-buddy/*.swift` files auto-compile via the project's `PBXFileSystemSynchronizedRootGroup` — no `project.pbxproj` edits.)*
 - `ScreenshotTextRecognizer.swift` — `import Vision`; OCR + normalized matcher + multi-line/column union + `globalScreenRect(forNormalizedVisionBox:)` (Phase 2).
-- `AXElementResolver.swift` — element-at-position, label DFS, `kAXPosition`/`kAXSize` read, `appKitRectFromAXFrame`, Electron wake (Phase 3; **share with `real-cursor-control.md`**).
+- `AXElementResolver.swift` — element-at-position, label DFS, `kAXPosition`/`kAXSize` read, `appKitRectFromAXFrame`, Electron wake (Phase 3).
 
 **Modified files:**
 - `CompanionManager.swift` — `activeHighlights` + `addHighlight`/`clearAllHighlights` (near `:25-48`); new tool dispatch cases (at `:2169`); `applyHighlightRegionDirective`/`applyHighlightTextDirective`/`applyRippleDirective`/`applyScrollAffordanceDirective`; the model-pixel-rect→global helper extending `mapScreenshotPixelCoordinateToGlobalScreenPoint` (`:1720-1734`); inline-tag parsers alongside `parsePointDirective` (`:1649-1703`); per-turn `clearAllHighlights()` reset.
@@ -581,5 +573,5 @@ All Plato additions marked `// MARK: - Plato` per repo convention; `import Combi
 5. **AX threading on the main actor.** Keeping the DFS on `@MainActor` risks a UI hitch if a target app is slow to answer IPC. Need a tight `AXUIElementSetMessagingTimeout` and possibly a dedicated serial AX actor — measure worst-case stall on a heavy app (Xcode, browser).
 6. **Spotlight compositing cost.** A full-screen animated dim layer over the 60fps overlay may stutter. Prototype on a multi-monitor Retina setup before committing to Phase 4.
 7. **Multi-display region spanning.** A highlight straddling two screens draws only on the center screen in v1. Acceptable, or split the rect per overlay window?
-8. **Shared AX resolver ownership.** If `real-cursor-control.md` ships, both docs want `AXElementResolver.swift`. Coordinate so it's built once (this doc reads frames; that doc also acts) — avoid two divergent copies.
+8. **AX resolver ownership.** `AXElementResolver.swift` belongs to this highlighting feature and reads element frames only — it never acts (no clicking / cursor control).
 9. **Color accessibility.** Red/green shading is the obvious default but fails red-green color blindness; pair every color with the outline + label, don't rely on hue alone.

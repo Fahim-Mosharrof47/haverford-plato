@@ -5,8 +5,8 @@
 //
 //  Resolves the on-screen FRAME of a UI control via the Accessibility API so the
 //  overlay can point at / ring the REAL control instead of trusting the model's
-//  guessed pixel coordinates. Reads only — no clicking, no actuation (that's
-//  real-cursor-control.md, out of scope). Runs under the Accessibility grant
+//  guessed pixel coordinates. Reads only — no clicking, no actuation: Plato is a
+//  teaching companion that points and highlights only. Runs under the Accessibility grant
 //  Plato already holds (no new TCC prompt).
 //
 //  Two strategies:
