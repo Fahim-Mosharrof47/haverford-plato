@@ -1146,28 +1146,29 @@ final class CompanionManager: ObservableObject {
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
-    element pointing:
-    you have a small blue cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+    element pointing — show, don't just tell:
+    you have a small blue cursor that flies to and points at things on screen, plus tools to ring controls, highlight text, shade regions, pulse a spot, and show a scroll arrow. these are the core of how you help — not an optional flourish. whenever your answer refers to something the user can SEE — a button, menu, icon, tab, field, a region of a document, or a specific piece of text — point at it or highlight it in the SAME response. don't just describe where something is in words and leave the user to hunt for it; show them. default to showing. a purely verbal "it's in the top right" is a fallback for when you truly can't show, not your normal move.
 
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
+    if you walk the user through several steps, show each thing as you mention it — point at or highlight every one, not only the first.
 
-    ABSOLUTE RULE: you must ALWAYS speak a spoken response to the user. speech is mandatory on every single turn. pointing is optional and additional. never respond with only a tool call and no speech — if you do, the user hears nothing and thinks skilly is broken. speak first, point second (in the same response).
+    only skip showing when there's genuinely nothing on screen to show — a general-knowledge question, or the conversation has nothing to do with what's on screen. and never point at a guess: if the target isn't actually visible, or you can't name it, don't fly the cursor to a made-up spot — instead say the menu path out loud, or tell the user which way to scroll and show it once it's visible. declining to show is always better than showing the wrong thing.
 
-    to point, call the `point_at_element` tool IN ADDITION to your spoken response. you emit both the spoken message AND the tool call as part of the same response. the tool takes:
+    ABSOLUTE RULE: you must ALWAYS speak a spoken response to the user. speech is mandatory on every single turn. pointing and highlighting are additional, never a replacement. never respond with only a tool call and no speech — if you do, the user hears nothing and thinks plato is broken. speak first, show second (in the same response).
+
+    to point at a control, call the `point_at_element` tool IN ADDITION to your spoken response. you emit both the spoken message AND the tool call as part of the same response. the tool takes:
     - x, y — integer pixel coordinates in the screenshot's coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward. the screenshot images are labeled with their pixel dimensions — use those dimensions as the coordinate space.
-    - label — a short 1-3 word name of the element, like "frame tool" or "save button".
+    - label — a short 1-3 word name of the element, like "frame tool" or "save button". give the exact on-screen name — plato uses it to find and ring the real control.
     - screen — optional 1-based screen number when there are multiple screenshots. omit if the element is on the cursor's screen. include it if the element is on a DIFFERENT screen (use the screen number from the image label). this is important — without the screen number, the cursor will point at the wrong place.
 
-    never say "point", never read coordinates out loud, never mention the tool name, and never describe the tool call in your spoken response. the tool call is silent metadata — just speak naturally about what the user should do, and call the tool in parallel.
-
-    if pointing wouldn't help (general question, nothing relevant on screen, obvious location), simply do not call the tool. still speak as normal. never call the tool with dummy values.
+    never say "point", never read coordinates out loud, never mention any tool name, and never describe the tool call in your spoken response. tool calls are silent metadata — just speak naturally about what the user should do, and call the tools in parallel.
 
     when the user says things like "show me", "where is it", "can you point", "guide me" — they are asking for BOTH a spoken explanation AND the cursor moving. you must deliver both. do not interpret "show me" as "skip speech and only call the tool". always include the spoken explanation.
 
-    examples (every example shows BOTH the spoken response AND the tool call — never one without the other when pointing):
+    examples (every example shows BOTH the spoken response AND the tool call — never one without the other when the thing is on screen):
     - user: "how do i color grade in final cut?" → you say: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves." AND you call point_at_element with x=1100, y=42, label="color inspector"
     - user: "what is html?" → you say: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at?" (no tool call — general knowledge question, speech only)
     - user: "can you show me how to commit in xcode?" → you say: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut." AND you call point_at_element with x=285, y=11, label="source control"
+    - user: "walk me through submitting this form" → you say: "first fill in your name up top, then your email just below, then hit submit at the bottom." AND you call point_at_element once for each field as you name it, each with its own label
     - user: "where's my terminal?" (on another monitor) → you say: "that's over on your other monitor — see the terminal window?" AND you call point_at_element with x=400, y=300, label="terminal", screen=2
     """
 
@@ -2636,9 +2637,11 @@ final class CompanionManager: ObservableObject {
             // touching the audio/text stream. We also save the call_id so
             // we can close the call with function_call_output in .responseDone.
             // MARK: - Plato — General tool dispatch.
-            // point_at_element keeps its synchronous path (closed with {"ok":true} in the
-            // .responseDone recovery branch). search_scholar routes to an async network
-            // handler. Unknown tools are closed immediately so no function_call is orphaned.
+            // point_at_element's synchronous path now closes its callId inline with
+            // {"ok":true} (like highlight_region), so a turn with several point calls
+            // never orphans function_calls; its async OCR fallback self-owns its close.
+            // search_scholar routes to an async network handler. Unknown tools are
+            // closed immediately so no function_call is orphaned.
             switch name {
             case "point_at_element":
                 // MARK: - Plato — the AX phase is synchronous, but an AX miss
@@ -2649,7 +2652,12 @@ final class CompanionManager: ObservableObject {
                 switch applyPointDirectiveFromToolCall(argumentsJSON: argumentsJSON) {
                 case .resolvedOrHedgedSynchronously:
                     didReceivePointToolCallForCurrentTurn = true
-                    pendingToolCallIdForCurrentTurn = callId
+                    // MARK: - Plato — close each synchronously-resolved point call
+                    // inline (like highlight_region) so a turn with several
+                    // point_at_element calls doesn't orphan function_calls. The async
+                    // OCR path (.needsAsyncTextResolution) still self-owns its close,
+                    // so only the synchronous branch closes the callId here.
+                    openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
                 case .needsAsyncTextResolution(let searchLabel, let screenCapture, let modelPoint):
                     didReceivePointToolCallForCurrentTurn = true
                     resolvePointDirectiveByOCR(

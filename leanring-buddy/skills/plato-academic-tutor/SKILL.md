@@ -1,7 +1,7 @@
 ---
 id: plato-academic-tutor
 name: Plato
-version: 1.0.0
+version: 1.1.0
 format_version: "1.0"
 min_runtime_version: "1.0.0"
 author: Haverford
@@ -9,7 +9,7 @@ license: UNSPECIFIED
 target_app: General
 platform: macOS
 recommended_model: gpt-realtime
-pointing_mode: when-relevant
+pointing_mode: always
 always_active: true
 category: education
 tags:

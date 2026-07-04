@@ -369,7 +369,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let pointAtElementTool: [String: Any] = [
             "type": "function",
             "name": "point_at_element",
-            "description": "Point the blue cursor at a UI element on the user's screen. This tool is ONLY an addition to your spoken response — it is never a replacement for speech. You must ALWAYS produce a normal spoken audio message explaining what the user should do, and then additionally call this tool in the same response to point at the element you just described. Never call this tool without also speaking. Never use this tool as your entire response. If pointing is not useful, simply do not call the tool and speak as normal. Do not mention coordinates, the word 'point', or this tool's name in your spoken response.",
+            "description": "Point the blue cursor at a UI element on the user's screen and ring it. Call this WHENEVER your spoken answer refers to a visible control — a button, menu, icon, tab, or field — so the user sees exactly what you mean instead of hunting for it. Showing is the default, not an extra. This tool is only ever an ADDITION to your spoken response, never a replacement: you must ALWAYS also speak a normal message explaining what to do. When you mention several controls in sequence, call this once for each as you name it. Do not call it for things that are not on screen or that you cannot name — say the menu path or where to scroll instead; never point at a guess. Do not mention coordinates, the word 'point', or this tool's name in your spoken response.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -455,7 +455,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let highlightRegionTool: [String: Any] = [
             "type": "function",
             "name": "highlight_region",
-            "description": "Draw a colored rectangle over a region of the user's screen to highlight an area — for example a section of a paper to study, or a panel to look at. ONLY an addition to your spoken response, never a replacement: always speak normally too. Prefer highlight_text when highlighting specific visible text. Do not mention coordinates, colors-as-data, or this tool's name in speech.",
+            "description": "Draw a colored rectangle over a region of the user's screen to highlight an area — for example a section of a paper to study, a figure, or a panel to look at. Call this whenever your answer refers to a region the user should look at. Prefer highlight_text when the target is specific visible text, and point_at_element when it is a single control. ONLY an addition to your spoken response, never a replacement: always speak normally too. Do not highlight things that are not visible on screen. Do not mention coordinates, colors-as-data, or this tool's name in speech.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -478,7 +478,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let rippleHereTool: [String: Any] = [
             "type": "function",
             "name": "ripple_here",
-            "description": "Show an expanding 'click here' pulse at a point on the user's screen, to draw the eye to a specific spot the user should click or look at. ONLY an addition to your spoken response, never a replacement. Do not mention coordinates or this tool's name in speech.",
+            "description": "Show an expanding 'click here' pulse at a point on the user's screen, to draw the eye to a specific spot the user should click or look at. Call this whenever you tell the user to click a specific visible spot. ONLY an addition to your spoken response, never a replacement. Do not mention coordinates or this tool's name in speech.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -498,7 +498,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let highlightTextTool: [String: Any] = [
             "type": "function",
             "name": "highlight_text",
-            "description": "Highlight specific visible text on the user's screen — a heading, sentence, or paragraph in a paper or document. Give the exact words as they appear on screen; the app finds and shades them. Use this for any document text instead of highlight_region. ONLY an addition to your spoken response. If the text is not currently visible, do not call this — guide the user to scroll first. Do not say coordinates or this tool's name aloud.",
+            "description": "Highlight specific visible text on the user's screen — a heading, sentence, or paragraph in a paper or document. Call this WHENEVER your answer quotes or refers to specific text the user can see, so they see exactly which words you mean. Give the exact words as they appear on screen; the app finds and shades them. Use this for any document text instead of highlight_region. ONLY an addition to your spoken response — always speak too. If the text is not currently visible, do not call this — guide the user to scroll first. Do not say coordinates or this tool's name aloud.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -518,7 +518,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let showScrollAffordanceTool: [String: Any] = [
             "type": "function",
             "name": "show_scroll_affordance",
-            "description": "Show a directional arrow telling the user to scroll, when the thing they need is not currently visible on screen. Always also say aloud which way to scroll and what to look for. Once they scroll and the target is visible, highlight it. Do not say this tool's name aloud.",
+            "description": "Show a directional arrow telling the user to scroll, when something you're referring to is not currently visible on screen. Call this instead of pointing at a guess when the target is off-screen. Always also say aloud which way to scroll and what to look for. Once they scroll and the target is visible, highlight it. Do not say this tool's name aloud.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -534,7 +534,7 @@ final class OpenAIRealtimeClient: ObservableObject {
         let spotlightRegionTool: [String: Any] = [
             "type": "function",
             "name": "spotlight_region",
-            "description": "Dim the whole screen except one rectangular region, to focus the user's attention on it. Use sparingly, for a single important area. Same coordinates as highlight_region. ONLY an addition to speech.",
+            "description": "Dim the whole screen except one rectangular region, to focus the user's attention on it. Use sparingly, for a single important area, since it clears other highlights. Same coordinates as highlight_region. ONLY an addition to speech.",
             "parameters": [
                 "type": "object",
                 "properties": [
