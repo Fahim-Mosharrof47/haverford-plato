@@ -291,14 +291,35 @@ final class CompanionManager: ObservableObject {
         openAIRealtimeClient.requestForcedSpokenResponse(instruction: instruction)
     }
 
+    // MARK: - Plato — True while Plato is mid push-to-talk turn, answering, still
+    // generating, or draining a spoken line's audio tail. Distraction nudges DEFER
+    // (skip this tick, keep the cooldown unstamped) rather than cancel, so a nudge
+    // never talks over the user or over a prior nudge, and is never dropped by the
+    // GA Realtime "one active response at a time" rule. Mirrors the readiness
+    // signals used by isOnboardingLineStillSpeaking.
+    private var isPlatoBusySpeakingOrListening: Bool {
+        voiceState != .idle
+            || openAIRealtimeClient.isModelSpeaking
+            || isWaitingForRealtimeAudioQueueDrain
+    }
+
     // MARK: - Plato — Focus watch (distraction nudges during an active focus block)
 
     private var focusWatchTimer: Timer?
     private var lastFocusNudgeAt: Date?
-    /// How often to glance at the screen during a focus block.
-    private let focusWatchIntervalSeconds: TimeInterval = 20
-    /// Minimum gap between spoken nudges so Plato never nags.
-    private let focusNudgeCooldownSeconds: TimeInterval = 180
+    // MARK: - Plato — Prevents overlapping focus checks: classifyFocus is a network
+    // call, and at a ~15s check interval a slow/hung request could otherwise let a
+    // second check start (and double-nudge) before the first finishes.
+    private var isFocusCheckInFlight = false
+    /// How often to glance at the screen during a focus block. Kept well below the
+    /// nudge cooldown so the every-other-check rhythm lands on the target cadence.
+    private let focusWatchIntervalSeconds: TimeInterval = 15
+    /// Minimum gap between spoken nudges. Set a few seconds BELOW the 30s target
+    /// cadence (not at it) so the post-classify stamp drift + timer jitter don't
+    /// push the next eligible check past the target and slip the cadence to ~45s.
+    /// Must stay strictly greater than focusWatchIntervalSeconds. Requirement:
+    /// nudge roughly every 30s while continuously off-task, first nudge ~15s.
+    private let focusNudgeCooldownSeconds: TimeInterval = 28
 
     private func startFocusWatch() {
         stopFocusWatch()
@@ -328,11 +349,25 @@ final class CompanionManager: ObservableObject {
         if let last = lastFocusNudgeAt, Date().timeIntervalSince(last) < focusNudgeCooldownSeconds {
             return
         }
+        // MARK: - Plato — Don't stack a vision call on top of one already running.
+        guard !isFocusCheckInFlight else { return }
+        // MARK: - Plato — Defer (don't cancel) if Plato is mid-turn: the user is
+        // holding push-to-talk, Plato is answering, a prior nudge is still being
+        // spoken, or its audio tail is still draining. Speaking now would either
+        // talk over the user or be dropped by the GA "one active response" rule.
+        // We simply skip this tick without stamping the cooldown, so the next
+        // ~15s check re-evaluates and speaks once Plato is idle again.
+        guard !isPlatoBusySpeakingOrListening else { return }
 
+        isFocusCheckInFlight = true
         Task { @MainActor in
+            defer { isFocusCheckInFlight = false }
             guard let capture = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first else { return }
             let result = await classifyFocus(jpeg: capture.imageData, topic: topic)
-            guard result.distracted, pomodoro.phase == .work, pomodoro.isRunning else { return }
+            // Re-check everything after the awaits: the block may have paused/ended,
+            // or Plato may have started speaking, while the vision call was in flight.
+            guard result.distracted, pomodoro.phase == .work, pomodoro.isRunning,
+                  !isPlatoBusySpeakingOrListening else { return }
             lastFocusNudgeAt = Date()
             let reasonClause = result.reason.map { " (looks like \($0))" } ?? ""
             speakProactiveAnnouncement(
@@ -1022,6 +1057,13 @@ final class CompanionManager: ObservableObject {
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
+            // MARK: - Plato — The user just engaged Plato directly; push the next
+            // distraction-nudge eligibility out by the full cooldown so Plato doesn't
+            // nag right after the user spoke to it. If they immediately go off-task,
+            // the next nudge is still only ~cooldown away. No effect outside a focus
+            // block (lastFocusNudgeAt is only consulted while the watch is running).
+            lastFocusNudgeAt = Date()
+
             // MARK: - Skilly — In Live Tutor mode, the PTT shortcut
             // toggles the mode on/off. Does NOT fall through to PTT.
             if AppSettings.shared.voiceInputMode == "liveTutor" {
@@ -1281,6 +1323,15 @@ final class CompanionManager: ObservableObject {
             pomodoro.pause()
         case "resume":
             pomodoro.resume()
+            // MARK: - Plato — resume() only restarts the countdown ticker; it does NOT
+            // re-fire onWorkStart, and the focus watch was invalidated when the pause
+            // tick hit the phase/isRunning guard. Re-arm it so distraction nudges keep
+            // working for the rest of the block. startFocusWatch() is idempotent
+            // (it calls stopFocusWatch() first), and its own guard no-ops unless we're
+            // genuinely in a running work block.
+            if pomodoro.phase == .work, pomodoro.isRunning {
+                startFocusWatch()
+            }
         case "stop":
             pomodoro.stop()
         case "skip_break":
