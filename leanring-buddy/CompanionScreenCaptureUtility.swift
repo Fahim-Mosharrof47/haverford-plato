@@ -162,7 +162,13 @@ enum CompanionScreenCaptureUtility {
         let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
 
         let configuration = SCStreamConfiguration()
-        let backingScaleFactor = nsScreenByDisplayID[display.displayID]?.backingScaleFactor ?? 2.0
+        // MARK: - Plato — never assume a 2.0 (Retina) scale. The display was
+        // matched via its NSScreen frame above, so the NSScreen is present in
+        // practice; if it is somehow absent, capture at the logical size (scale 1)
+        // rather than a guessed 2.0, which would allocate a wrong-size buffer on a
+        // 1x or 3x display. OCR uses NORMALIZED boxes, so a lower-res fallback
+        // image never affects pointing accuracy.
+        let backingScaleFactor = nsScreenByDisplayID[display.displayID]?.backingScaleFactor ?? 1.0
         configuration.width = Int(CGFloat(display.width) * backingScaleFactor)
         configuration.height = Int(CGFloat(display.height) * backingScaleFactor)
 

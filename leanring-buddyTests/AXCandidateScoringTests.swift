@@ -121,4 +121,63 @@ struct AXCandidateScoringTests {
         )
         #expect(best == onSecondary)
     }
+
+    // MARK: - Plato — RC-2 proximity gate
+
+    @Test func substringMatchFarFromHintIsDeclinedWhenGated() {
+        let farSubstring = candidate("Save As Template", x: 1300, y: 800) // ~far from hint
+        let best = AXCandidateScoring.bestCandidate(
+            among: [farSubstring],
+            normalizedQuery: "save",
+            approximatePoint: CGPoint(x: 100, y: 100),
+            visibleScreenFrames: [mainScreen],
+            maxDistanceForInexactMatch: 300 // 0.33 * 900-ish
+        )
+        #expect(best == nil)
+    }
+
+    @Test func exactMatchFarFromHintBypassesGate() {
+        let farExact = candidate("Save", x: 1300, y: 800)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [farExact],
+            normalizedQuery: "save",
+            approximatePoint: CGPoint(x: 100, y: 100),
+            visibleScreenFrames: [mainScreen],
+            maxDistanceForInexactMatch: 300
+        )
+        #expect(best == farExact)
+    }
+
+    @Test func substringMatchNearHintPassesGate() {
+        let nearSubstring = candidate("Save As Template", x: 110, y: 110)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [nearSubstring],
+            normalizedQuery: "save",
+            approximatePoint: CGPoint(x: 120, y: 120),
+            visibleScreenFrames: [mainScreen],
+            maxDistanceForInexactMatch: 300
+        )
+        #expect(best == nearSubstring)
+    }
+
+    @Test func noGateWhenDistanceLimitNil() {
+        let farSubstring = candidate("Save As Template", x: 1300, y: 800)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [farSubstring],
+            normalizedQuery: "save",
+            approximatePoint: CGPoint(x: 100, y: 100),
+            visibleScreenFrames: [mainScreen]) // default nil ⇒ ungated, back-compat
+        #expect(best == farSubstring)
+    }
+
+    // MARK: - Plato — RC-3 plausibility
+
+    @Test func giantFrameRejectedSmallFrameAccepted() {
+        let displayArea: CGFloat = 1440 * 900
+        let control = CGRect(x: 10, y: 10, width: 80, height: 30)
+        let container = CGRect(x: 0, y: 0, width: 1440, height: 500) // >40% of display
+        #expect(AXCandidateScoring.isPlausibleControlFrame(control, displayArea: displayArea) == true)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displayArea: displayArea) == false)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displayArea: 0) == true) // no info ⇒ don't over-decline
+    }
 }

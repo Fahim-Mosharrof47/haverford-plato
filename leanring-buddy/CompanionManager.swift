@@ -1705,18 +1705,32 @@ final class CompanionManager: ObservableObject {
         SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
     }
 
+    // MARK: - Plato — outcome of the synchronous phase of a point directive.
+    // The AX label/hit-test resolution is synchronous, but when it can't confirm
+    // the named control we hand off to an ASYNC OCR pass (mirroring highlight_text)
+    // that owns closing the function call itself. This tells the dispatcher which
+    // callId-lifecycle path to take.
+    private enum PointDirectiveSyncOutcome {
+        /// AX resolved (ring drawn), or the directive was declined/malformed — no
+        /// further async work is pending, so the caller closes the callId.
+        case resolvedOrHedgedSynchronously
+        /// AX could not confirm the control but the model gave an in-bounds guess;
+        /// run the OCR fallback, which will close the callId when it finishes.
+        case needsAsyncTextResolution(searchLabel: String, screenCapture: CompanionScreenCapture, modelPoint: CGPoint?)
+    }
+
     // MARK: - Skilly — Tool-call pointing directive
     /// Applies a pointing directive that arrived as a structured function
     /// call from gpt-realtime, instead of as an inline [POINT:...] text tag.
     /// This is the preferred path — it keeps coordinates out of the audio
     /// and text streams entirely, so the TTS never voices them.
-    private func applyPointDirectiveFromToolCall(argumentsJSON: String) {
+    private func applyPointDirectiveFromToolCall(argumentsJSON: String) -> PointDirectiveSyncOutcome {
         guard let argumentsData = argumentsJSON.data(using: .utf8),
               let parsedArguments = try? JSONSerialization.jsonObject(with: argumentsData) as? [String: Any] else {
             #if DEBUG
             print("⚠️ point_at_element: could not parse arguments JSON")
             #endif
-            return
+            return .resolvedOrHedgedSynchronously
         }
 
         // Accept integers or doubles for x/y.
@@ -1727,20 +1741,20 @@ final class CompanionManager: ObservableObject {
         } else if let doubleX = parsedArguments["x"] as? Double {
             screenshotXInPixels = Int(doubleX)
         } else {
-            return
+            return .resolvedOrHedgedSynchronously
         }
         if let integerY = parsedArguments["y"] as? Int {
             screenshotYInPixels = integerY
         } else if let doubleY = parsedArguments["y"] as? Double {
             screenshotYInPixels = Int(doubleY)
         } else {
-            return
+            return .resolvedOrHedgedSynchronously
         }
 
         guard let elementLabel = (parsedArguments["label"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !elementLabel.isEmpty else {
-            return
+            return .resolvedOrHedgedSynchronously
         }
 
         // Optional 1-based screen index when the model is pointing on a
@@ -1761,7 +1775,7 @@ final class CompanionManager: ObservableObject {
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: parsedPointDirective, in: currentTurnScreenCaptures
         ) else {
-            return
+            return .resolvedOrHedgedSynchronously
         }
 
         // Out-of-range (hallucinated) coordinates decline the directive entirely —
@@ -1793,19 +1807,99 @@ final class CompanionManager: ObservableObject {
                 globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
                 createdAt: Date(), timeToLive: 4.0))
             SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
-            return
+            return .resolvedOrHedgedSynchronously
         }
 
         // AX could not resolve the control AND the coordinates were hallucinated:
-        // decline (no pointing) rather than fly to a clamped screen edge.
-        guard let modelPoint else { return }
+        // decline (no pointing) rather than fly to a clamped screen edge. With no
+        // in-bounds guess there is also nothing to anchor an OCR-miss hedge to.
+        guard let modelPoint else { return .resolvedOrHedgedSynchronously }
 
-        detectedElementScreenLocation = modelPoint
-        detectedElementDisplayFrame = targetScreenCapture.displayFrame
-        // Degrade honestly: AX couldn't confirm the control, so the landing spot
-        // is the model's guess. Hedge the bubble instead of asserting precision.
-        detectedElementBubbleText = "around here — \(parsedPointDirective.elementLabel)"
-        SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+        // MARK: - Plato — AX missed but the guess is in-bounds. Defer to the OCR
+        // fallback (non-AX surfaces: web/PDF/canvas). It rings the real text frame
+        // on a hit and honestly hedges the cursor on a miss — no confident wrong
+        // ring. The async task owns closing the callId.
+        return .needsAsyncTextResolution(
+            searchLabel: parsedPointDirective.elementLabel,
+            screenCapture: targetScreenCapture,
+            modelPoint: modelPoint
+        )
+    }
+
+    // MARK: - Plato — OCR fallback for point_at_element (mirrors highlight_text).
+    /// Runs only when the AX label/hit-test resolution could not confirm the named
+    /// control. Matches the label text on a FRESH native-resolution capture of the
+    /// target display; on a hit it rings the real text frame, on a miss it degrades
+    /// to the honest hedged cursor-only path (no ring). Generation-stamped exactly
+    /// like highlight_text so a slow OCR can never paint after the next turn starts.
+    /// Closes `callId` itself.
+    private func resolvePointDirectiveByOCR(searchLabel: String,
+                                            screenCapture: CompanionScreenCapture,
+                                            modelPoint: CGPoint?,
+                                            callId: String) {
+        let displayFrame = screenCapture.displayFrame
+        let turnScreenshotJPEGData = screenCapture.imageData
+        let generationAtRequest = highlightGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Fresh capture at tool-call time; falls back to the turn screenshot
+            // if the capture fails (display unplugged mid-call, TCC hiccup).
+            let freshDisplayImage = try? await CompanionScreenCaptureUtility.captureDisplayImageForOCR(
+                displayFrame: displayFrame
+            )
+
+            // OCR is synchronous + CPU-bound — keep it off the main actor.
+            let matchResult = await Task.detached(priority: .userInitiated) { () -> ScreenshotTextMatcher.MatchResult in
+                let imageForOCR = freshDisplayImage ?? NSBitmapImageRep(data: turnScreenshotJPEGData)?.cgImage
+                guard let imageForOCR else { return .notFound }
+                let recognizedLines = (try? ScreenshotTextRecognizer.recognizeText(in: imageForOCR)) ?? []
+                return ScreenshotTextMatcher.matchResult(for: searchLabel, in: recognizedLines)
+            }.value
+
+            guard generationAtRequest == self.highlightGeneration else {
+                // The turn moved on (new turn, scroll, display change) while OCR
+                // ran — pointing now would ring the wrong content.
+                self.openAIRealtimeClient.sendFunctionCallOutput(
+                    callId: callId,
+                    output: #"{"ok":false,"reason":"the screen changed before pointing"}"#
+                )
+                return
+            }
+
+            if case .match(let normalizedBox) = matchResult {
+                let globalFrame = HighlightGeometry.globalRectFromNormalizedVisionBox(
+                    normalizedBox, displayFrame: displayFrame
+                )
+                let controlCenter = CGPoint(x: globalFrame.midX, y: globalFrame.midY)
+                let hostingScreenFrame = NSScreen.screens
+                    .first(where: { $0.frame.contains(controlCenter) })?.frame
+                    ?? displayFrame
+                self.detectedElementScreenLocation = controlCenter
+                self.detectedElementDisplayFrame = hostingScreenFrame
+                self.detectedElementBubbleText = searchLabel
+                self.addHighlight(PlatoHighlight(
+                    kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
+                    globalFrame: globalFrame, label: searchLabel,
+                    createdAt: Date(), timeToLive: 4.0))
+                SkillyAnalytics.trackElementPointed(elementLabel: searchLabel)
+                self.openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+                return
+            }
+
+            // OCR miss: honest degrade — move the cursor to the in-bounds guess
+            // with a hedged bubble and NO ring, or decline entirely if no guess.
+            if let modelPoint {
+                self.detectedElementScreenLocation = modelPoint
+                self.detectedElementDisplayFrame = displayFrame
+                self.detectedElementBubbleText = "around here — \(searchLabel)"
+                SkillyAnalytics.trackElementPointed(elementLabel: searchLabel)
+            }
+            self.openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: #"{"ok":false,"reason":"could not confirm that control on screen"}"#
+            )
+        }
     }
 
     // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
@@ -2213,10 +2307,14 @@ final class CompanionManager: ObservableObject {
                 currentTurnScreenCaptures = allScreenCaptures
                 RealtimeTelemetry.shared.recordVisionUsed()
                 for (screenIndex, screenCapture) in allScreenCaptures.enumerated() {
+                    // MARK: - Plato — give the model a SINGLE coordinate space (the
+                    // image's own pixel grid). Previously we also advertised the
+                    // display's point size, and a model that answered in points
+                    // produced coordinates scaled by displayPoints/screenshotPixels
+                    // (a systematic down-right offset that grew with display size).
                     let screenshotDescription = """
                     \(screenCapture.label). \
-                    coordinate space: \(screenCapture.screenshotWidthInPixels)x\(screenCapture.screenshotHeightInPixels) pixels. \
-                    app display frame in points: \(Int(screenCapture.displayFrame.width))x\(Int(screenCapture.displayFrame.height)). \
+                    coordinate space: this image is \(screenCapture.screenshotWidthInPixels) pixels wide by \(screenCapture.screenshotHeightInPixels) pixels tall; give x,y in THIS pixel grid, top-left origin. \
                     screen number: \(screenIndex + 1).
                     """
                     openAIRealtimeClient.sendScreenshot(
@@ -2543,9 +2641,22 @@ final class CompanionManager: ObservableObject {
             // handler. Unknown tools are closed immediately so no function_call is orphaned.
             switch name {
             case "point_at_element":
-                applyPointDirectiveFromToolCall(argumentsJSON: argumentsJSON)
-                didReceivePointToolCallForCurrentTurn = true
-                pendingToolCallIdForCurrentTurn = callId
+                // MARK: - Plato — the AX phase is synchronous, but an AX miss
+                // hands off to an async OCR fallback that closes the callId itself
+                // (mirrors highlight_text): set didReceivePointToolCallForCurrentTurn
+                // but NOT pendingToolCallIdForCurrentTurn, so the .responseDone
+                // recovery branch does not also try to close a callId the async task owns.
+                switch applyPointDirectiveFromToolCall(argumentsJSON: argumentsJSON) {
+                case .resolvedOrHedgedSynchronously:
+                    didReceivePointToolCallForCurrentTurn = true
+                    pendingToolCallIdForCurrentTurn = callId
+                case .needsAsyncTextResolution(let searchLabel, let screenCapture, let modelPoint):
+                    didReceivePointToolCallForCurrentTurn = true
+                    resolvePointDirectiveByOCR(
+                        searchLabel: searchLabel, screenCapture: screenCapture,
+                        modelPoint: modelPoint, callId: callId
+                    )
+                }
             case "search_scholar":
                 handleScholarToolCall(argumentsJSON: argumentsJSON, callId: callId)
             case "control_pomodoro":
@@ -2627,10 +2738,15 @@ final class CompanionManager: ObservableObject {
                     let allScreenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
                     currentTurnScreenCaptures = allScreenCaptures
                     for (screenIndex, screenCapture) in allScreenCaptures.enumerated() {
+                        // MARK: - Plato — give the model a SINGLE coordinate space
+                        // (the image's own pixel grid). Previously we also advertised
+                        // the display's point size, and a model that answered in
+                        // points produced coordinates scaled by
+                        // displayPoints/screenshotPixels (a systematic down-right
+                        // offset that grew with display size).
                         let screenshotDescription = """
                         \(screenCapture.label). \
-                        coordinate space: \(screenCapture.screenshotWidthInPixels)x\(screenCapture.screenshotHeightInPixels) pixels. \
-                        app display frame in points: \(Int(screenCapture.displayFrame.width))x\(Int(screenCapture.displayFrame.height)). \
+                        coordinate space: this image is \(screenCapture.screenshotWidthInPixels) pixels wide by \(screenCapture.screenshotHeightInPixels) pixels tall; give x,y in THIS pixel grid, top-left origin. \
                         screen number: \(screenIndex + 1).
                         """
                         openAIRealtimeClient.sendScreenshot(

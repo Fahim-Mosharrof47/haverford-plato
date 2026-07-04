@@ -42,6 +42,13 @@ enum AXElementResolver {
     /// Per-message AX IPC timeout, applied process-wide via the system-wide element.
     private static let messagingTimeoutSeconds: Float = 0.25
 
+    /// A prefix/substring name match farther than this fraction of the hosting
+    /// display's larger edge from the model's hinted point is declined. Generous
+    /// enough to absorb the model's coordinate imprecision, tight enough to reject
+    /// a same-word control across the screen. Fraction (not a fixed pixel count)
+    /// so it behaves identically on a 13" laptop and a 32" 6K display.
+    private static let inexactMatchProximityFraction: CGFloat = 0.33
+
     /// Height of the primary (menu-bar, origin == .zero) screen — the AX flip reference.
     static func primaryScreenHeight() -> CGFloat {
         NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
@@ -108,11 +115,20 @@ enum AXElementResolver {
         }
         search(appElement, depth: 0)
 
+        // MARK: - Plato — derive the proximity gate from the actual display the
+        // hint falls on (never a hardcoded pixel budget).
+        let proximityGate: CGFloat? = approximatePoint.flatMap { hintPoint in
+            let hostFrame = (NSScreen.screens.first(where: { $0.frame.contains(hintPoint) })
+                             ?? NSScreen.main)?.frame
+            guard let hostFrame else { return nil }
+            return max(hostFrame.width, hostFrame.height) * inexactMatchProximityFraction
+        }
         return AXCandidateScoring.bestCandidate(
             among: matchingCandidates,
             normalizedQuery: normalizedQuery,
             approximatePoint: approximatePoint,
-            visibleScreenFrames: NSScreen.screens.map { $0.frame }
+            visibleScreenFrames: NSScreen.screens.map { $0.frame },
+            maxDistanceForInexactMatch: proximityGate
         )?.globalFrame
     }
 
@@ -130,8 +146,18 @@ enum AXElementResolver {
         AXUIElementSetMessagingTimeout(systemWide, messagingTimeoutSeconds)
         var hitElement: AXUIElement?
         let hitStatus = AXUIElementCopyElementAtPosition(systemWide, topLeftX, topLeftY, &hitElement)
-        guard hitStatus == .success, let element = hitElement else { return nil }
-        return frameOfElement(element, primaryHeight: primaryHeight)
+        guard hitStatus == .success, let element = hitElement,
+              let hitFrame = frameOfElement(element, primaryHeight: primaryHeight) else { return nil }
+
+        // MARK: - Plato — reject giant frames. An imprecise guessed point often
+        // hit-tests a big container; ringing it lands nowhere near the intended
+        // control. Cap is a fraction of the display the point is on (any size).
+        let hostFrame = (NSScreen.screens.first(where: { $0.frame.contains(appKitPoint) })
+                         ?? NSScreen.main)?.frame ?? .zero
+        guard AXCandidateScoring.isPlausibleControlFrame(hitFrame, displayArea: hostFrame.width * hostFrame.height) else {
+            return nil
+        }
+        return hitFrame
     }
 
     // MARK: - AX reading helpers

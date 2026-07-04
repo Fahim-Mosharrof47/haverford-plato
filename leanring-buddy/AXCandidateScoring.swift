@@ -39,6 +39,22 @@ enum AXCandidateScoring {
     /// other by at least this many points, or the match is declared ambiguous.
     static let ambiguityDistanceMarginInPoints: CGFloat = 40
 
+    // MARK: - Plato — hit-test plausibility
+
+    /// Largest fraction of a display a hit-tested element may cover and still be
+    /// treated as a pointable CONTROL. Above this it is almost certainly a
+    /// container (web content area, window body, scroll view); ringing that
+    /// points confidently at nothing, so the caller declines instead.
+    static let maxHitTestControlAreaFraction: CGFloat = 0.4
+
+    /// True when `frame` is small enough (relative to its display) to be a real
+    /// control rather than a container. `displayArea <= 0` ⇒ treat as plausible
+    /// (no display info to judge against — do not over-decline).
+    static func isPlausibleControlFrame(_ frame: CGRect, displayArea: CGFloat) -> Bool {
+        guard displayArea > 0 else { return true }
+        return (frame.width * frame.height) <= displayArea * maxHitTestControlAreaFraction
+    }
+
     static func matchQuality(of matchedText: String, forNormalizedQuery normalizedQuery: String) -> MatchQuality? {
         let normalizedText = matchedText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalizedText.contains(normalizedQuery) else { return nil }
@@ -57,11 +73,19 @@ enum AXCandidateScoring {
     ///     when it is decisively nearer (ambiguityDistanceMarginInPoints);
     ///     otherwise decline — two equally plausible "Save" buttons means we
     ///     don't know which one the model meant.
+    /// `maxDistanceForInexactMatch`: when non-nil AND an approximate point is
+    /// available, a prefix/substring winner farther than this from the model's
+    /// hinted point is DECLINED (nil) instead of ringed — a weak name match on
+    /// the far side of the screen is probably a different control that merely
+    /// shares a word. Exact-title matches bypass the gate (strong evidence).
+    /// The distance is passed in (not computed here) so this stays pure/testable;
+    /// the caller derives it from the actual display size (dimension-agnostic).
     static func bestCandidate(
         among candidates: [AXControlCandidate],
         normalizedQuery: String,
         approximatePoint: CGPoint?,
-        visibleScreenFrames: [CGRect]
+        visibleScreenFrames: [CGRect],
+        maxDistanceForInexactMatch: CGFloat? = nil
     ) -> AXControlCandidate? {
         let scoredOnScreenCandidates: [(candidate: AXControlCandidate, quality: MatchQuality, distance: CGFloat)] =
             candidates.compactMap { candidate in
@@ -88,6 +112,20 @@ enum AXCandidateScoring {
         }
 
         guard let bestRankedCandidate = rankedCandidates.first else { return nil }
+
+        // MARK: - Plato — spatial sanity gate for weak (non-exact) matches.
+        // A prefix/substring winner far from the model's hint is probably a
+        // different control that merely shares a word; decline rather than ring
+        // it. Exact-title matches bypass the gate (strong evidence). The gate is
+        // skipped when no approximate point exists (distance would be a
+        // meaningless 0) or no limit was supplied (back-compatible callers).
+        if bestRankedCandidate.quality != .exact,
+           approximatePoint != nil,
+           let maxDistanceForInexactMatch,
+           bestRankedCandidate.distance > maxDistanceForInexactMatch {
+            return nil
+        }
+
         if rankedCandidates.count == 1 { return bestRankedCandidate.candidate }
 
         let runnerUpCandidate = rankedCandidates[1]
