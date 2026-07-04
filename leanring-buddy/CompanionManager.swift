@@ -1057,6 +1057,14 @@ final class CompanionManager: ObservableObject {
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
+            // MARK: - Plato — pre-arm Chromium/Electron accessibility for THIS turn.
+            // The user is about to speak (seconds pass before any point_at_element
+            // tool call), so the frontmost app's on-demand AX tree has time to
+            // populate — the real control is then resolvable by name instead of
+            // forcing the unsafe hit-test fallback. Cheap, non-blocking; runs for
+            // both PTT and liveTutor since it precedes the mode branch.
+            AXElementResolver.enableOnDemandAccessibilityForFrontmostApp()
+
             // MARK: - Plato — The user just engaged Plato directly; push the next
             // distraction-nudge eligibility out by the full cooldown so Plato doesn't
             // nag right after the user spoke to it. If they immediately go off-task,
@@ -1712,12 +1720,34 @@ final class CompanionManager: ObservableObject {
     // that owns closing the function call itself. This tells the dispatcher which
     // callId-lifecycle path to take.
     private enum PointDirectiveSyncOutcome {
-        /// AX resolved (ring drawn), or the directive was declined/malformed — no
-        /// further async work is pending, so the caller closes the callId.
-        case resolvedOrHedgedSynchronously
+        /// AX resolved the real control and a ring was drawn — report success.
+        case resolvedSynchronously
+        /// The directive was declined or malformed — NO ring was drawn. `reason`
+        /// is sent to the model so it recovers verbally instead of claiming a
+        /// highlight it never made.
+        case declinedSynchronously(reason: String)
         /// AX could not confirm the control but the model gave an in-bounds guess;
         /// run the OCR fallback, which will close the callId when it finishes.
         case needsAsyncTextResolution(searchLabel: String, screenCapture: CompanionScreenCapture, modelPoint: CGPoint?)
+    }
+
+    // MARK: - Plato — honest failure phrasing handed to the model on a point miss,
+    // so it describes the location in words instead of claiming a highlight.
+    private func honestLocateFailureReason(for label: String) -> String {
+        "could not visually locate '\(label)' on screen; do not claim you highlighted it — describe where it is in words instead"
+    }
+
+    // MARK: - Plato — Builds a `function_call_output` JSON string safely (the label
+    // inside `reason` may contain quotes/backslashes — never string-interpolate it
+    // into a raw JSON literal). Falls back to a bare ok flag if encoding ever fails.
+    private func pointToolOutputJSON(ok: Bool, reason: String? = nil) -> String {
+        var payload: [String: Any] = ["ok": ok]
+        if let reason { payload["reason"] = reason }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return ok ? #"{"ok":true}"# : #"{"ok":false}"#
+        }
+        return json
     }
 
     // MARK: - Skilly — Tool-call pointing directive
@@ -1731,7 +1761,7 @@ final class CompanionManager: ObservableObject {
             #if DEBUG
             print("⚠️ point_at_element: could not parse arguments JSON")
             #endif
-            return .resolvedOrHedgedSynchronously
+            return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
         // Accept integers or doubles for x/y.
@@ -1742,20 +1772,20 @@ final class CompanionManager: ObservableObject {
         } else if let doubleX = parsedArguments["x"] as? Double {
             screenshotXInPixels = Int(doubleX)
         } else {
-            return .resolvedOrHedgedSynchronously
+            return .declinedSynchronously(reason: "could not read the pointing request")
         }
         if let integerY = parsedArguments["y"] as? Int {
             screenshotYInPixels = integerY
         } else if let doubleY = parsedArguments["y"] as? Double {
             screenshotYInPixels = Int(doubleY)
         } else {
-            return .resolvedOrHedgedSynchronously
+            return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
         guard let elementLabel = (parsedArguments["label"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !elementLabel.isEmpty else {
-            return .resolvedOrHedgedSynchronously
+            return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
         // Optional 1-based screen index when the model is pointing on a
@@ -1776,7 +1806,7 @@ final class CompanionManager: ObservableObject {
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: parsedPointDirective, in: currentTurnScreenCaptures
         ) else {
-            return .resolvedOrHedgedSynchronously
+            return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
         // Out-of-range (hallucinated) coordinates decline the directive entirely —
@@ -1808,13 +1838,16 @@ final class CompanionManager: ObservableObject {
                 globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
                 createdAt: Date(), timeToLive: 4.0))
             SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
-            return .resolvedOrHedgedSynchronously
+            return .resolvedSynchronously
         }
 
         // AX could not resolve the control AND the coordinates were hallucinated:
         // decline (no pointing) rather than fly to a clamped screen edge. With no
         // in-bounds guess there is also nothing to anchor an OCR-miss hedge to.
-        guard let modelPoint else { return .resolvedOrHedgedSynchronously }
+        guard let modelPoint else {
+            return .declinedSynchronously(
+                reason: honestLocateFailureReason(for: parsedPointDirective.elementLabel))
+        }
 
         // MARK: - Plato — AX missed but the guess is in-bounds. Defer to the OCR
         // fallback (non-AX surfaces: web/PDF/canvas). It rings the real text frame
@@ -1898,7 +1931,7 @@ final class CompanionManager: ObservableObject {
             }
             self.openAIRealtimeClient.sendFunctionCallOutput(
                 callId: callId,
-                output: #"{"ok":false,"reason":"could not confirm that control on screen"}"#
+                output: self.pointToolOutputJSON(ok: false, reason: self.honestLocateFailureReason(for: searchLabel))
             )
         }
     }
@@ -1914,7 +1947,7 @@ final class CompanionManager: ObservableObject {
         // Secondary: the element directly under the model's guessed point (only
         // helps when the guess already landed on the right control).
         guard let approximatePoint else { return nil }
-        return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint)
+        return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint, matchingLabel: trimmedLabel)
     }
 
     // MARK: - Plato — Tool argument decoding helpers (shared by highlight tools)
@@ -2650,14 +2683,21 @@ final class CompanionManager: ObservableObject {
                 // but NOT pendingToolCallIdForCurrentTurn, so the .responseDone
                 // recovery branch does not also try to close a callId the async task owns.
                 switch applyPointDirectiveFromToolCall(argumentsJSON: argumentsJSON) {
-                case .resolvedOrHedgedSynchronously:
-                    didReceivePointToolCallForCurrentTurn = true
+                case .resolvedSynchronously:
                     // MARK: - Plato — close each synchronously-resolved point call
                     // inline (like highlight_region) so a turn with several
                     // point_at_element calls doesn't orphan function_calls. The async
-                    // OCR path (.needsAsyncTextResolution) still self-owns its close,
-                    // so only the synchronous branch closes the callId here.
-                    openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+                    // OCR path (.needsAsyncTextResolution) still self-owns its close.
+                    didReceivePointToolCallForCurrentTurn = true
+                    openAIRealtimeClient.sendFunctionCallOutput(
+                        callId: callId, output: pointToolOutputJSON(ok: true))
+                case .declinedSynchronously(let reason):
+                    // No ring drawn — tell the model the truth so it recovers
+                    // verbally. Still mark the tool as fired so the forced spoken
+                    // follow-up net runs and no function_call is orphaned.
+                    didReceivePointToolCallForCurrentTurn = true
+                    openAIRealtimeClient.sendFunctionCallOutput(
+                        callId: callId, output: pointToolOutputJSON(ok: false, reason: reason))
                 case .needsAsyncTextResolution(let searchLabel, let screenCapture, let modelPoint):
                     didReceivePointToolCallForCurrentTurn = true
                     resolvePointDirectiveByOCR(

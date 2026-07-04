@@ -41,18 +41,29 @@ enum AXCandidateScoring {
 
     // MARK: - Plato — hit-test plausibility
 
-    /// Largest fraction of a display a hit-tested element may cover and still be
-    /// treated as a pointable CONTROL. Above this it is almost certainly a
-    /// container (web content area, window body, scroll view); ringing that
+    /// Largest fraction of a display's AREA a hit-tested element may cover and
+    /// still be treated as a pointable CONTROL. Above this it is almost certainly
+    /// a container (web content area, window body, scroll view); ringing that
     /// points confidently at nothing, so the caller declines instead.
     static let maxHitTestControlAreaFraction: CGFloat = 0.4
 
-    /// True when `frame` is small enough (relative to its display) to be a real
-    /// control rather than a container. `displayArea <= 0` ⇒ treat as plausible
-    /// (no display info to judge against — do not over-decline).
-    static func isPlausibleControlFrame(_ frame: CGRect, displayArea: CGFloat) -> Bool {
-        guard displayArea > 0 else { return true }
-        return (frame.width * frame.height) <= displayArea * maxHitTestControlAreaFraction
+    /// Largest fraction of a display's WIDTH / HEIGHT a control may span. A frame
+    /// that nearly spans an entire edge is a bar/panel/strip, not a single
+    /// control, even when its AREA is small (a full-width, ~35pt-tall toolbar is
+    /// only ~3% area but ~99% width). 0.9 leaves generous headroom for genuinely
+    /// wide/tall controls (a long search field, a tall list) while rejecting the
+    /// edge-spanning bars an imprecise hit-test lands on.
+    static let maxHitTestControlEdgeFraction: CGFloat = 0.9
+
+    /// True when `frame` is small enough — by area AND by each dimension — to be a
+    /// real control rather than a container. A non-positive display size ⇒ treat
+    /// as plausible (no info to judge against — do not over-decline).
+    static func isPlausibleControlFrame(_ frame: CGRect, displaySize: CGSize) -> Bool {
+        guard displaySize.width > 0, displaySize.height > 0 else { return true }
+        let withinArea = (frame.width * frame.height) <= (displaySize.width * displaySize.height) * maxHitTestControlAreaFraction
+        let withinWidth = frame.width <= displaySize.width * maxHitTestControlEdgeFraction
+        let withinHeight = frame.height <= displaySize.height * maxHitTestControlEdgeFraction
+        return withinArea && withinWidth && withinHeight
     }
 
     static func matchQuality(of matchedText: String, forNormalizedQuery normalizedQuery: String) -> MatchQuality? {
@@ -61,6 +72,37 @@ enum AXCandidateScoring {
         if normalizedText == normalizedQuery { return .exact }
         if normalizedText.hasPrefix(normalizedQuery) { return .prefix }
         return .substring
+    }
+
+    // MARK: - Plato — query normalization
+    //
+    // Models habitually append a generic role word to a control's real name
+    // ("download button", "save icon", "layers tab"), but the accessible name is
+    // just "Download"/"Save"/"Layers". Stripping a TRAILING generic role word lets
+    // "download button" match the accessible name "Download" at the EXACT tier
+    // instead of never matching. Kept pure so it is unit-tested without a live tree.
+
+    /// Generic UI role words that models tack onto a control's name. Conservative
+    /// on purpose: excludes words that are commonly part of REAL control names
+    /// (e.g. "tool" — "Frame tool" in Figma must survive; "inspector"; "panel").
+    static let genericTrailingRoleWords: Set<String> = [
+        "button", "buttons", "icon", "menu", "link", "tab", "field",
+        "checkbox", "radio", "toggle", "switch", "dropdown", "control", "slider"
+    ]
+
+    /// Lowercase, trim, and strip trailing generic role words while at least one
+    /// non-role token remains (so a bare "menu" or "button" query is preserved).
+    /// Returns the whitespace-joined remainder. Never returns empty for a non-empty
+    /// input. Only the TAIL is stripped — "download button" → "download",
+    /// "menu button" → "menu", "color inspector" → "color inspector" (unchanged),
+    /// "frame tool" → "frame tool" (unchanged).
+    static func normalizedControlQuery(from label: String) -> String {
+        let lowered = label.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        var tokens = lowered.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        while tokens.count > 1, let last = tokens.last, genericTrailingRoleWords.contains(last) {
+            tokens.removeLast()
+        }
+        return tokens.joined(separator: " ")
     }
 
     /// Picks the best candidate for the query, or nil when nothing qualifies or

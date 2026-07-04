@@ -173,11 +173,64 @@ struct AXCandidateScoringTests {
     // MARK: - Plato — RC-3 plausibility
 
     @Test func giantFrameRejectedSmallFrameAccepted() {
-        let displayArea: CGFloat = 1440 * 900
+        let displaySize = CGSize(width: 1440, height: 900)
         let control = CGRect(x: 10, y: 10, width: 80, height: 30)
         let container = CGRect(x: 0, y: 0, width: 1440, height: 500) // >40% of display
-        #expect(AXCandidateScoring.isPlausibleControlFrame(control, displayArea: displayArea) == true)
-        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displayArea: displayArea) == false)
-        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displayArea: 0) == true) // no info ⇒ don't over-decline
+        #expect(AXCandidateScoring.isPlausibleControlFrame(control, displaySize: displaySize) == true)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displaySize: displaySize) == false)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(container, displaySize: .zero) == true) // no info ⇒ don't over-decline
+    }
+
+    // MARK: - Plato — D2 per-dimension plausibility caps
+
+    // The direct regression: a full-width, thin toolbar is only ~3.4% AREA (sails
+    // through the area-only gate) but ~99% WIDTH — the wrong-ring the old logic
+    // produced. Must now be rejected by the width cap.
+    @Test func wideThingToolbarRejected() {
+        let displaySize = CGSize(width: 1512, height: 982)
+        let toolbar = CGRect(x: 7, y: 947, width: 1498, height: 34)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(toolbar, displaySize: displaySize) == false)
+    }
+
+    @Test func tallSidebarRejected() {
+        let displaySize = CGSize(width: 1440, height: 900)
+        let sidebar = CGRect(x: 0, y: 0, width: 40, height: 900) // full-height thin strip
+        #expect(AXCandidateScoring.isPlausibleControlFrame(sidebar, displaySize: displaySize) == false)
+    }
+
+    @Test func normalControlAccepted() {
+        let displaySize = CGSize(width: 1440, height: 900)
+        let control = CGRect(x: 10, y: 10, width: 80, height: 30)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(control, displaySize: displaySize) == true)
+    }
+
+    @Test func zeroDisplaySizeIsPlausible() {
+        let anyContainer = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        #expect(AXCandidateScoring.isPlausibleControlFrame(anyContainer, displaySize: .zero) == true)
+    }
+
+    // MARK: - Plato — D5b query normalization
+
+    @Test func stripsTrailingRoleWord() {
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "download button") == "download")
+    }
+
+    @Test func stripsMultipleTrailingRoleWords() {
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "save icon button") == "save")
+    }
+
+    @Test func stopsAtSingleRoleToken() {
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "menu button") == "menu")
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "button") == "button")
+    }
+
+    @Test func preservesRealNamesWithNonRoleTail() {
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "color inspector") == "color inspector")
+        #expect(AXCandidateScoring.normalizedControlQuery(from: "frame tool") == "frame tool")
+    }
+
+    @Test func normalizedQueryMatchesExactTier() {
+        let normalized = AXCandidateScoring.normalizedControlQuery(from: "download button")
+        #expect(AXCandidateScoring.matchQuality(of: "Download", forNormalizedQuery: normalized) == .exact)
     }
 }
