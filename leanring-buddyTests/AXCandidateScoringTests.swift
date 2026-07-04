@@ -80,11 +80,57 @@ struct AXCandidateScoringTests {
         let best = AXCandidateScoring.bestCandidate(
             among: [offScreen, onScreen],
             normalizedQuery: "print",
-            approximatePoint: nil,
+            // A positional hint is present (in-range coords), so the on-screen
+            // prefix match is allowed — this test's subject is off-screen filtering,
+            // not the no-hint exact-only rule (covered separately below).
+            approximatePoint: CGPoint(x: 200, y: 200),
             visibleScreenFrames: [mainScreen]
         )
         // The off-screen EXACT match loses to the on-screen prefix match.
         #expect(best == onScreen)
+    }
+
+    // MARK: - Plato — no-positional-hint gate (adversarial finding)
+
+    // With NO approximate point (hallucinated/out-of-range coords), a lone weak
+    // match must be DECLINED, not ringed. This is the exact wrong-ring class the
+    // fix targets: query "save" (role-word-stripped from "save button")
+    // substring-hits an unrelated "Autosave" and, ungated, was ringed ok:true.
+    @Test func weakSubstringMatchWithoutHintDeclines() {
+        let autosave = candidate("Autosave", x: 300, y: 300)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [autosave],
+            normalizedQuery: "save",
+            approximatePoint: nil,
+            visibleScreenFrames: [mainScreen]
+        )
+        #expect(best == nil)
+    }
+
+    // A lone PREFIX match with no hint is likewise a wrong-ring risk → decline.
+    @Test func weakPrefixMatchWithoutHintDeclines() {
+        let saveAs = candidate("Save As Template", x: 300, y: 300)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [saveAs],
+            normalizedQuery: "save",
+            approximatePoint: nil,
+            visibleScreenFrames: [mainScreen]
+        )
+        #expect(best == nil)
+    }
+
+    // An EXACT-title match has strong evidence and is accepted even with no hint
+    // (this keeps the common "download button" → "Download" path working when the
+    // model's coordinates are out of range).
+    @Test func exactMatchWithoutHintIsAccepted() {
+        let save = candidate("Save", x: 300, y: 300)
+        let best = AXCandidateScoring.bestCandidate(
+            among: [save],
+            normalizedQuery: "save",
+            approximatePoint: nil,
+            visibleScreenFrames: [mainScreen]
+        )
+        #expect(best == save)
     }
 
     @Test func allCandidatesOffScreenReturnsNil() {

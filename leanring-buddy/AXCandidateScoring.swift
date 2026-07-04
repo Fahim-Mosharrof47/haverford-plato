@@ -122,6 +122,12 @@ enum AXCandidateScoring {
     /// shares a word. Exact-title matches bypass the gate (strong evidence).
     /// The distance is passed in (not computed here) so this stays pure/testable;
     /// the caller derives it from the actual display size (dimension-agnostic).
+    ///  4. With NO approximate point at all (the model's coordinates were out of
+    ///     range / hallucinated), a prefix/substring winner has ZERO positional
+    ///     evidence to corroborate a weak name match — so only an EXACT-title
+    ///     match is accepted; otherwise decline. This is what stops a role-word-
+    ///     stripped query like "save" (from "save button") from ringing an
+    ///     unrelated "Autosave" when there is no hint to gate it against.
     static func bestCandidate(
         among candidates: [AXControlCandidate],
         normalizedQuery: String,
@@ -154,6 +160,17 @@ enum AXCandidateScoring {
         }
 
         guard let bestRankedCandidate = rankedCandidates.first else { return nil }
+
+        // MARK: - Plato — no-positional-hint gate for weak (non-exact) matches.
+        // When approximatePoint is nil the model's coordinates were out of range
+        // (hallucinated), so there is NO positional evidence and the spatial gate
+        // below cannot run (every distance is a meaningless 0). A lone prefix/
+        // substring match here is a wrong-ring risk — a role-word-stripped query
+        // like "save" substring-hits an unrelated "Autosave". Require an EXACT-
+        // title match in that case; otherwise decline (decline > mis-point).
+        if approximatePoint == nil, bestRankedCandidate.quality != .exact {
+            return nil
+        }
 
         // MARK: - Plato — spatial sanity gate for weak (non-exact) matches.
         // A prefix/substring winner far from the model's hint is probably a
