@@ -53,13 +53,22 @@ final class CompanionManager: ObservableObject {
     /// lingers after the user scrolls.
     @Published var activeHighlights: [PlatoHighlight] = []
     private var highlightExpirationTimer: Timer?
+    /// Bumped on every clearAllHighlights() (i.e. every turn boundary). Async
+    /// resolution work (highlight_text OCR) records the generation it started
+    /// under and drops its result if the generation moved on — a slow OCR from
+    /// the previous turn must never paint a stale box into the current one.
+    private var highlightGeneration = 0
 
     func addHighlight(_ highlight: PlatoHighlight) {
+        installHighlightDismissalMonitorIfNeeded()
         activeHighlights.append(highlight)
         startHighlightExpirationTimerIfNeeded()
     }
 
     func clearAllHighlights() {
+        // Always advance the generation: a turn boundary invalidates in-flight
+        // OCR work even when nothing is currently drawn.
+        highlightGeneration += 1
         guard !activeHighlights.isEmpty || highlightExpirationTimer != nil else { return }
         activeHighlights.removeAll()
         highlightExpirationTimer?.invalidate()
@@ -74,12 +83,27 @@ final class CompanionManager: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 let now = Date()
-                self.activeHighlights.removeAll { now.timeIntervalSince($0.createdAt) > $0.timeToLive }
+                self.activeHighlights.removeAll { $0.isExpired(at: now) }
                 if self.activeHighlights.isEmpty {
                     self.highlightExpirationTimer?.invalidate()
                     self.highlightExpirationTimer = nil
                 }
             }
+        }
+    }
+
+    // MARK: - Plato — Auto-dismiss highlights on first user interaction
+    private var highlightDismissalMonitor: Any?
+
+    /// Absolute-coordinate highlights go stale the instant content moves; a
+    /// scroll/click/drag is the signal to clear them. Global monitors are
+    /// read-only (cannot consume events), which is exactly what we want.
+    private func installHighlightDismissalMonitorIfNeeded() {
+        guard highlightDismissalMonitor == nil else { return }
+        highlightDismissalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.scrollWheel, .leftMouseDown, .leftMouseDragged]
+        ) { [weak self] _ in
+            Task { @MainActor in self?.clearAllHighlights() }
         }
     }
 
@@ -457,6 +481,7 @@ final class CompanionManager: ObservableObject {
         startPermissionPolling()
         bindShortcutTransitions()
         bindSettingsObservers()
+        installScreenReconfigurationObserverIfNeeded()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -471,6 +496,33 @@ final class CompanionManager: ObservableObject {
         if hasCompletedOnboarding && allPermissionsGranted {
             startRealtimeSessionPrewarmIfNeeded()
         }
+    }
+
+    // MARK: - Plato — Display reconfiguration (dock/undock, rearrange)
+    /// Overlay windows and every BlueCursorView's immutable screenFrame are
+    /// captured at creation, so adding/removing/rearranging monitors leaves a
+    /// newly attached display with NO overlay and the remaining overlays
+    /// converting against stale frames. Rebuild the overlays (and drop
+    /// highlights — their global frames are stale by definition) whenever the
+    /// screen arrangement changes.
+    private var screenParametersObserver: NSObjectProtocol?
+
+    private func installScreenReconfigurationObserverIfNeeded() {
+        guard screenParametersObserver == nil else { return }
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleScreenReconfiguration() }
+        }
+    }
+
+    private func handleScreenReconfiguration() {
+        clearAllHighlights()
+        clearDetectedElementLocation()
+        guard overlayWindowManager.isShowingOverlay() else { return }
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
     }
 
     /// Called by BlueCursorView after the buddy finishes its pointing
@@ -1567,45 +1619,34 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Keeps the transcript bubble clean while the model streams. This strips
-    /// complete [POINT:...] tags and also hides a partially streamed trailing
+    /// ALL complete [POINT:...] tags (the model emits them inline mid-sentence,
+    /// not only at the end) and also hides a partially streamed trailing
     /// [POINT:... fragment so users never see protocol metadata.
     private func updateRealtimeResponseBubble(usingRawModelResponse rawModelResponseText: String) {
-        let responseTextWithoutCompletePointTag = rawModelResponseText.replacingOccurrences(
-            of: #"\s*\[POINT:[^\]]+\]\s*$"#,
-            with: "",
-            options: .regularExpression
+        let cleanedResponseBubbleText = PointDirectiveParser.stripPointTagArtifactsForStreamingBubble(
+            from: rawModelResponseText
         )
-        let responseTextWithoutPointTagMetadata = responseTextWithoutCompletePointTag.replacingOccurrences(
-            of: #"\s*\[POINT:[^\]]*$"#,
-            with: "",
-            options: .regularExpression
-        )
-
-        let cleanedResponseBubbleText = responseTextWithoutPointTagMetadata.trimmingCharacters(in: .whitespacesAndNewlines)
         realtimeResponseBubbleText = cleanedResponseBubbleText
         isShowingRealtimeResponseBubble = !cleanedResponseBubbleText.isEmpty
     }
 
     // MARK: - Point Directive Parsing
-
-    private struct ParsedPointDirective {
-        let screenshotXInPixels: Int
-        let screenshotYInPixels: Int
-        let elementLabel: String
-        let oneBasedScreenNumber: Int?
-    }
+    // ParsedPointDirective + parsing/stripping/screen-resolution live in
+    // PointDirectiveParsing.swift so the malformed-model-output surface is
+    // unit-testable (review findings D-09/D-10/D-11).
 
     private func applyPointDirectiveIfPresent(in fullModelResponseText: String) {
-        guard let parsedPointDirective = parsePointDirective(from: fullModelResponseText),
-              let targetScreenCapture = resolveTargetScreenCapture(for: parsedPointDirective) else {
+        guard let parsedPointDirective = PointDirectiveParser.parse(from: fullModelResponseText),
+              let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+                  for: parsedPointDirective, in: currentTurnScreenCaptures
+              ),
+              let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+                  screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
+                  screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
+                  screenCapture: targetScreenCapture
+              ) else {
             return
         }
-
-        let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(
-            screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
-            screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
-            screenCapture: targetScreenCapture
-        )
 
         detectedElementScreenLocation = screenLocation
         detectedElementDisplayFrame = targetScreenCapture.displayFrame
@@ -1666,10 +1707,15 @@ final class CompanionManager: ObservableObject {
             elementLabel: elementLabel,
             oneBasedScreenNumber: oneBasedScreenNumber
         )
-        guard let targetScreenCapture = resolveTargetScreenCapture(for: parsedPointDirective) else {
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: parsedPointDirective, in: currentTurnScreenCaptures
+        ) else {
             return
         }
 
+        // Out-of-range (hallucinated) coordinates decline the directive entirely —
+        // but the AX name search below can still rescue the point, because it
+        // never needed the coordinates in the first place.
         let modelPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
             screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
             screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
@@ -1680,8 +1726,16 @@ final class CompanionManager: ObservableObject {
         if let controlFrame = resolveControlGlobalFrame(
             label: parsedPointDirective.elementLabel, approximatePoint: modelPoint
         ) {
-            detectedElementScreenLocation = CGPoint(x: controlFrame.midX, y: controlFrame.midY)
-            detectedElementDisplayFrame = targetScreenCapture.displayFrame
+            // Anchor the animation to the screen that actually CONTAINS the
+            // resolved control — the AX match may sit on a different display
+            // than the one the model designated (its screen guess can be wrong
+            // in exactly the cases where its pixel guess was).
+            let controlCenter = CGPoint(x: controlFrame.midX, y: controlFrame.midY)
+            let hostingScreenFrame = NSScreen.screens
+                .first(where: { $0.frame.contains(controlCenter) })?.frame
+                ?? targetScreenCapture.displayFrame
+            detectedElementScreenLocation = controlCenter
+            detectedElementDisplayFrame = hostingScreenFrame
             detectedElementBubbleText = parsedPointDirective.elementLabel
             addHighlight(PlatoHighlight(
                 kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
@@ -1691,21 +1745,29 @@ final class CompanionManager: ObservableObject {
             return
         }
 
+        // AX could not resolve the control AND the coordinates were hallucinated:
+        // decline (no pointing) rather than fly to a clamped screen edge.
+        guard let modelPoint else { return }
+
         detectedElementScreenLocation = modelPoint
         detectedElementDisplayFrame = targetScreenCapture.displayFrame
-        detectedElementBubbleText = parsedPointDirective.elementLabel
+        // Degrade honestly: AX couldn't confirm the control, so the landing spot
+        // is the model's guess. Hedge the bubble instead of asserting precision.
+        detectedElementBubbleText = "around here — \(parsedPointDirective.elementLabel)"
         SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
     }
 
     // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
     // over the model's guessed pixels. nil → caller falls back to model coordinates.
-    private func resolveControlGlobalFrame(label: String, approximatePoint: CGPoint) -> CGRect? {
+    private func resolveControlGlobalFrame(label: String, approximatePoint: CGPoint?) -> CGRect? {
         let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedLabel.isEmpty, let frameByName = AXElementResolver.controlFrame(matchingLabel: trimmedLabel) {
+        if !trimmedLabel.isEmpty,
+           let frameByName = AXElementResolver.controlFrame(matchingLabel: trimmedLabel, near: approximatePoint) {
             return frameByName
         }
         // Secondary: the element directly under the model's guessed point (only
         // helps when the guess already landed on the right control).
+        guard let approximatePoint else { return nil }
         return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint)
     }
 
@@ -1744,7 +1806,9 @@ final class CompanionManager: ObservableObject {
             screenshotXInPixels: x, screenshotYInPixels: y,
             elementLabel: label ?? "", oneBasedScreenNumber: oneBasedScreenNumber
         )
-        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: resolverDirective, in: currentTurnScreenCaptures
+        ) else { return }
 
         let globalFrame = HighlightGeometry.globalRectFromScreenshotPixelRect(
             x: x, y: y, width: width, height: height,
@@ -1755,6 +1819,8 @@ final class CompanionManager: ObservableObject {
 
         // MARK: - Plato — snap a single control to its real AX frame (by name, then point)
         if (arguments["snap_to_control"] as? Bool) ?? false {
+            // nil when the box center is hallucinated — the AX name search
+            // still runs; only the point-based hit-test fallback is skipped.
             let centerPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
                 screenshotXInPixels: x + (width / 2),
                 screenshotYInPixels: y + (height / 2),
@@ -1792,11 +1858,14 @@ final class CompanionManager: ObservableObject {
             screenshotXInPixels: x, screenshotYInPixels: y,
             elementLabel: label ?? "", oneBasedScreenNumber: oneBasedScreenNumber
         )
-        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: resolverDirective, in: currentTurnScreenCaptures
+        ) else { return }
 
-        let globalPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+        // Hallucinated coordinates decline the ripple (never pulse at a clamped edge).
+        guard let globalPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
             screenshotXInPixels: x, screenshotYInPixels: y, screenCapture: targetScreenCapture
-        )
+        ) else { return }
         // Zero-size rect: the ripple view centers on its midpoint.
         let globalFrame = CGRect(x: globalPoint.x, y: globalPoint.y, width: 0, height: 0)
         addHighlight(PlatoHighlight(kind: .ripplePulse(color: PlatoHighlight.color(forName: "blue")),
@@ -1805,10 +1874,20 @@ final class CompanionManager: ObservableObject {
     }
 
     // MARK: - Plato — highlight_text handler (async OCR)
-    private func applyHighlightTextDirective(argumentsJSON: String) {
+    /// Resolves the model's named text to an exact on-screen rect and closes the
+    /// function call with the REAL outcome once OCR finishes (never a premature
+    /// {"ok":true} — the model must not claim it highlighted something that
+    /// never rendered). OCR runs on a FRESH native-resolution capture of the
+    /// target display: the per-turn 1280px JPEG is seconds stale (the user may
+    /// have scrolled while speaking) and too small for paper body text.
+    private func applyHighlightTextDirective(argumentsJSON: String, callId: String) {
         guard let arguments = decodeToolArguments(argumentsJSON),
               let searchText = (arguments["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !searchText.isEmpty else {
+            openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: #"{"ok":false,"reason":"missing or empty text argument"}"#
+            )
             return
         }
         let colorName = (arguments["color"] as? String) ?? "yellow"
@@ -1819,116 +1898,163 @@ final class CompanionManager: ObservableObject {
             screenshotXInPixels: 0, screenshotYInPixels: 0,
             elementLabel: label ?? searchText, oneBasedScreenNumber: oneBasedScreenNumber
         )
-        guard let targetScreenCapture = resolveTargetScreenCapture(for: resolverDirective) else { return }
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: resolverDirective, in: currentTurnScreenCaptures
+        ) else {
+            openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: #"{"ok":false,"reason":"no screenshot exists for that screen"}"#
+            )
+            return
+        }
 
-        // Snapshot the value-type bits we need off the main actor.
-        let jpegData = targetScreenCapture.imageData
+        // Snapshot the value-type bits the detached OCR work needs.
+        let turnScreenshotJPEGData = targetScreenCapture.imageData
         let displayFrame = targetScreenCapture.displayFrame
+        // Stamp the request with the current turn's generation so a slow OCR
+        // can never paint a stale box after the next turn started.
+        let generationAtRequest = highlightGeneration
 
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let cgImage = NSBitmapImageRep(data: jpegData)?.cgImage else { return }
-            let recognizedLines = (try? ScreenshotTextRecognizer.recognizeText(in: cgImage)) ?? []
-            guard let normalizedBox = ScreenshotTextMatcher.bestMatchBoundingBox(for: searchText, in: recognizedLines) else {
-                // No confident match — do nothing (the model already spoke; never
-                // shade the wrong paragraph). A future enhancement can speak a fallback.
-                return
-            }
-            let globalFrame = HighlightGeometry.globalRectFromNormalizedVisionBox(normalizedBox, displayFrame: displayFrame)
-            await MainActor.run {
-                self?.addHighlight(PlatoHighlight(
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Fresh capture at tool-call time; falls back to the turn screenshot
+            // if the capture fails (display unplugged mid-call, TCC hiccup).
+            let freshDisplayImage = try? await CompanionScreenCaptureUtility.captureDisplayImageForOCR(
+                displayFrame: displayFrame
+            )
+
+            // The OCR itself is synchronous + CPU-bound — keep it off the main actor.
+            let matchResult = await Task.detached(priority: .userInitiated) { () -> ScreenshotTextMatcher.MatchResult in
+                let imageForOCR = freshDisplayImage ?? NSBitmapImageRep(data: turnScreenshotJPEGData)?.cgImage
+                guard let imageForOCR else { return .notFound }
+                let recognizedLines = (try? ScreenshotTextRecognizer.recognizeText(in: imageForOCR)) ?? []
+                return ScreenshotTextMatcher.matchResult(for: searchText, in: recognizedLines)
+            }.value
+
+            switch matchResult {
+            case .match(let normalizedBox):
+                guard generationAtRequest == self.highlightGeneration else {
+                    // The turn moved on (new turn, scroll, display change) while
+                    // OCR ran — drawing now would shade the wrong content.
+                    self.openAIRealtimeClient.sendFunctionCallOutput(
+                        callId: callId,
+                        output: #"{"ok":false,"reason":"the screen changed before the highlight could render"}"#
+                    )
+                    return
+                }
+                let globalFrame = HighlightGeometry.globalRectFromNormalizedVisionBox(
+                    normalizedBox, displayFrame: displayFrame
+                )
+                self.addHighlight(PlatoHighlight(
                     kind: .filledRegion(color: PlatoHighlight.color(forName: colorName)),
                     globalFrame: globalFrame, label: label,
                     createdAt: Date(), timeToLive: 5.0
                 ))
+                self.openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+            case .ambiguous(let matchCount):
+                // Continue (not just close) so the model verbally recovers
+                // instead of having silently claimed a highlight it never drew.
+                self.openAIRealtimeClient.sendToolResultAndContinue(
+                    callId: callId,
+                    output: #"{"ok":false,"reason":"that text appears in \#(matchCount) places on screen — tell the user, and retry with a longer, unique phrase"}"#
+                )
+            case .notFound:
+                self.openAIRealtimeClient.sendToolResultAndContinue(
+                    callId: callId,
+                    output: #"{"ok":false,"reason":"that text was not found on screen — it may be scrolled out of view; tell the user where to scroll instead"}"#
+                )
             }
         }
     }
 
-    private func parsePointDirective(from responseText: String) -> ParsedPointDirective? {
-        guard let regularExpression = try? NSRegularExpression(pattern: #"\[POINT:([^\]]+)\]"#) else {
-            return nil
+    // MARK: - Plato — show_scroll_affordance handler
+    /// Directional "scroll this way" arrow near the relevant screen edge, for
+    /// targets that are scrolled out of view (the prompt names this tool).
+    private func applyScrollAffordanceDirective(argumentsJSON: String) {
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let directionName = (arguments["direction"] as? String)?.lowercased() else {
+            return
         }
-
-        let fullResponseRange = NSRange(responseText.startIndex..<responseText.endIndex, in: responseText)
-        let allMatches = regularExpression.matches(in: responseText, range: fullResponseRange)
-        guard let lastPointMatch = allMatches.last,
-              lastPointMatch.numberOfRanges > 1,
-              let payloadRange = Range(lastPointMatch.range(at: 1), in: responseText) else {
-            return nil
+        let direction: PlatoHighlight.ArrowDirection
+        switch directionName {
+        case "up": direction = .up
+        case "left": direction = .left
+        case "right": direction = .right
+        default: direction = .down
         }
-
-        let payload = responseText[payloadRange].trimmingCharacters(in: .whitespacesAndNewlines)
-        if payload.caseInsensitiveCompare("none") == .orderedSame {
-            return nil
-        }
-
-        let payloadSegments = payload
-            .split(separator: ":", omittingEmptySubsequences: false)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-
-        guard payloadSegments.count >= 2 else { return nil }
-
-        let coordinateSegment = payloadSegments[0]
-        let coordinateComponents = coordinateSegment
-            .split(separator: ",", omittingEmptySubsequences: false)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard coordinateComponents.count == 2,
-              let screenshotXInPixels = Int(coordinateComponents[0]),
-              let screenshotYInPixels = Int(coordinateComponents[1]) else {
-            return nil
-        }
-
-        var labelSegments = Array(payloadSegments.dropFirst())
-        var oneBasedScreenNumber: Int?
-        if let lastSegment = labelSegments.last?.lowercased(),
-           lastSegment.hasPrefix("screen"),
-           let parsedScreenNumber = Int(lastSegment.replacingOccurrences(of: "screen", with: "")) {
-            oneBasedScreenNumber = parsedScreenNumber
-            labelSegments.removeLast()
-        }
-
-        let elementLabel = labelSegments
-            .joined(separator: ":")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !elementLabel.isEmpty else { return nil }
-
-        return ParsedPointDirective(
-            screenshotXInPixels: screenshotXInPixels,
-            screenshotYInPixels: screenshotYInPixels,
-            elementLabel: elementLabel,
-            oneBasedScreenNumber: oneBasedScreenNumber
+        let label = (arguments["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oneBasedScreenNumber = integerValue(from: arguments["screen"])
+        let resolverDirective = ParsedPointDirective(
+            screenshotXInPixels: 0, screenshotYInPixels: 0,
+            elementLabel: label ?? "", oneBasedScreenNumber: oneBasedScreenNumber
         )
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: resolverDirective, in: currentTurnScreenCaptures
+        ) else { return }
+
+        // Place the arrow near the relevant edge of the target display.
+        let frame = targetScreenCapture.displayFrame
+        let arrowCenter: CGPoint
+        switch direction {
+        case .down:  arrowCenter = CGPoint(x: frame.midX, y: frame.minY + 80)
+        case .up:    arrowCenter = CGPoint(x: frame.midX, y: frame.maxY - 80)
+        case .left:  arrowCenter = CGPoint(x: frame.minX + 80, y: frame.midY)
+        case .right: arrowCenter = CGPoint(x: frame.maxX - 80, y: frame.midY)
+        }
+        let globalFrame = CGRect(x: arrowCenter.x, y: arrowCenter.y, width: 0, height: 0)
+        addHighlight(PlatoHighlight(
+            kind: .directionalArrow(direction: direction, color: PlatoHighlight.color(forName: "blue")),
+            globalFrame: globalFrame, label: label, createdAt: Date(), timeToLive: 4.0
+        ))
     }
 
-    private func resolveTargetScreenCapture(for parsedPointDirective: ParsedPointDirective) -> CompanionScreenCapture? {
-        guard !currentTurnScreenCaptures.isEmpty else {
-            return nil
+    // MARK: - Plato — spotlight_region handler
+    /// Dims everything except one region. Sparing, single-focus emphasis.
+    private func applySpotlightDirective(argumentsJSON: String) {
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let x = integerValue(from: arguments["x"]),
+              let y = integerValue(from: arguments["y"]),
+              let width = integerValue(from: arguments["width"]),
+              let height = integerValue(from: arguments["height"]) else {
+            return
         }
-
-        if let oneBasedScreenNumber = parsedPointDirective.oneBasedScreenNumber {
-            let zeroBasedScreenIndex = oneBasedScreenNumber - 1
-            if currentTurnScreenCaptures.indices.contains(zeroBasedScreenIndex) {
-                return currentTurnScreenCaptures[zeroBasedScreenIndex]
-            }
-        }
-
-        return currentTurnScreenCaptures.first(where: { $0.isCursorScreen }) ?? currentTurnScreenCaptures.first
+        let oneBasedScreenNumber = integerValue(from: arguments["screen"])
+        let resolverDirective = ParsedPointDirective(
+            screenshotXInPixels: x, screenshotYInPixels: y,
+            elementLabel: "", oneBasedScreenNumber: oneBasedScreenNumber
+        )
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: resolverDirective, in: currentTurnScreenCaptures
+        ) else { return }
+        let globalFrame = HighlightGeometry.globalRectFromScreenshotPixelRect(
+            x: x, y: y, width: width, height: height,
+            screenshotWidthInPixels: targetScreenCapture.screenshotWidthInPixels,
+            screenshotHeightInPixels: targetScreenCapture.screenshotHeightInPixels,
+            displayFrame: targetScreenCapture.displayFrame
+        )
+        // Only one spotlight at a time — clear others first so dim layers don't stack.
+        clearAllHighlights()
+        addHighlight(PlatoHighlight(kind: .spotlight(dimOpacity: 0.45), globalFrame: globalFrame,
+                                    label: nil, createdAt: Date(), timeToLive: 4.0))
     }
 
+    /// Delegates to the single source of truth in HighlightGeometry (the math
+    /// used to be duplicated here). nil means the coordinates fell outside the
+    /// screenshot beyond tolerance — the directive should be declined, not
+    /// clamped to a screen edge and pointed at confidently.
     private func mapScreenshotPixelCoordinateToGlobalScreenPoint(
         screenshotXInPixels: Int,
         screenshotYInPixels: Int,
         screenCapture: CompanionScreenCapture
-    ) -> CGPoint {
-        let clampedXInPixels = max(0, min(screenshotXInPixels, screenCapture.screenshotWidthInPixels))
-        let clampedYInPixels = max(0, min(screenshotYInPixels, screenCapture.screenshotHeightInPixels))
-
-        let normalizedX = CGFloat(clampedXInPixels) / CGFloat(max(screenCapture.screenshotWidthInPixels, 1))
-        let normalizedY = CGFloat(clampedYInPixels) / CGFloat(max(screenCapture.screenshotHeightInPixels, 1))
-
-        let globalX = screenCapture.displayFrame.minX + (screenCapture.displayFrame.width * normalizedX)
-        let globalY = screenCapture.displayFrame.maxY - (screenCapture.displayFrame.height * normalizedY)
-        return CGPoint(x: globalX, y: globalY)
+    ) -> CGPoint? {
+        HighlightGeometry.globalPointFromScreenshotPixel(
+            x: screenshotXInPixels,
+            y: screenshotYInPixels,
+            screenshotWidthInPixels: screenCapture.screenshotWidthInPixels,
+            screenshotHeightInPixels: screenCapture.screenshotHeightInPixels,
+            displayFrame: screenCapture.displayFrame
+        )
     }
 
     // MARK: - Skilly — Rust realtime transition tracking
@@ -2330,12 +2456,11 @@ final class CompanionManager: ObservableObject {
                 applyPointDirectiveIfPresent(in: realtimeResponseText)
             }
             if let currentTurnUserTranscript {
-                let cleanedAssistantResponse = realtimeResponseText.replacingOccurrences(
-                    of: #"\s*\[POINT:[^\]]+\]\s*$"#,
-                    with: "",
-                    options: .regularExpression
+                // Strip ALL inline [POINT] tags (not just a trailing one) so raw
+                // protocol metadata never lands in the curriculum/session transcripts.
+                let trimmedAssistantResponse = PointDirectiveParser.stripCompletedPointTags(
+                    from: realtimeResponseText
                 )
-                let trimmedAssistantResponse = cleanedAssistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
                 skillManager?.didReceiveInteraction(
                     transcript: currentTurnUserTranscript,
                     assistantResponse: trimmedAssistantResponse
@@ -2387,7 +2512,18 @@ final class CompanionManager: ObservableObject {
                 didReceivePointToolCallForCurrentTurn = true
                 openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             case "highlight_text":
-                applyHighlightTextDirective(argumentsJSON: argumentsJSON)
+                // Async close: the handler resolves OCR first and reports the REAL
+                // outcome ({"ok":false,...} on a miss so the model verbally
+                // recovers) — never a premature {"ok":true} for a highlight that
+                // may never render.
+                applyHighlightTextDirective(argumentsJSON: argumentsJSON, callId: callId)
+                didReceivePointToolCallForCurrentTurn = true
+            case "show_scroll_affordance":
+                applyScrollAffordanceDirective(argumentsJSON: argumentsJSON)
+                didReceivePointToolCallForCurrentTurn = true
+                openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
+            case "spotlight_region":
+                applySpotlightDirective(argumentsJSON: argumentsJSON)
                 didReceivePointToolCallForCurrentTurn = true
                 openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             default:

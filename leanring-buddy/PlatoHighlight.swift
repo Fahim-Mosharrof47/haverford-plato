@@ -39,6 +39,12 @@ struct PlatoHighlight: Identifiable {
     /// Auto-expiry. Always finite — never persistent. Recommend 3–5s.
     let timeToLive: TimeInterval
 
+    /// Whether this highlight's time-to-live has elapsed at `date`.
+    /// Pure so the pruner's expiry rule is unit-testable.
+    func isExpired(at date: Date) -> Bool {
+        date.timeIntervalSince(createdAt) > timeToLive
+    }
+
     /// Maps the model's color name to an intentional, legible highlight color.
     /// Colors are paired with an outline + label by the views, never hue alone,
     /// so red/green remain distinguishable for color-blind users.

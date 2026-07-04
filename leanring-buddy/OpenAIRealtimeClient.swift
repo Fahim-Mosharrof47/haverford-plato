@@ -511,6 +511,43 @@ final class OpenAIRealtimeClient: ObservableObject {
             ]
         ]
 
+        // MARK: - Plato — show_scroll_affordance tool
+        // The prompt's highlight guidance names this tool for off-screen targets;
+        // it must stay registered or the model's call lands in the unknown-tool
+        // error branch mid-answer (review finding D-05).
+        let showScrollAffordanceTool: [String: Any] = [
+            "type": "function",
+            "name": "show_scroll_affordance",
+            "description": "Show a directional arrow telling the user to scroll, when the thing they need is not currently visible on screen. Always also say aloud which way to scroll and what to look for. Once they scroll and the target is visible, highlight it. Do not say this tool's name aloud.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "direction": ["type": "string", "enum": ["up", "down", "left", "right"], "description": "Which way the user should scroll."],
+                    "label": ["type": "string", "description": "Short name of what they're scrolling to."],
+                    "screen": ["type": "integer", "description": "1-based screen index; omit for the cursor's screen."]
+                ],
+                "required": ["direction"]
+            ]
+        ]
+
+        // MARK: - Plato — spotlight_region tool
+        let spotlightRegionTool: [String: Any] = [
+            "type": "function",
+            "name": "spotlight_region",
+            "description": "Dim the whole screen except one rectangular region, to focus the user's attention on it. Use sparingly, for a single important area. Same coordinates as highlight_region. ONLY an addition to speech.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "x": ["type": "integer", "description": "Left edge X in screenshot pixels (top-left origin)."],
+                    "y": ["type": "integer", "description": "Top edge Y in screenshot pixels (top-left origin)."],
+                    "width": ["type": "integer", "description": "Region width in screenshot pixels."],
+                    "height": ["type": "integer", "description": "Region height in screenshot pixels."],
+                    "screen": ["type": "integer", "description": "1-based screen index; omit for the cursor's screen."]
+                ],
+                "required": ["x", "y", "width", "height"]
+            ]
+        ]
+
         // MARK: - Skilly — GA Realtime session.update shape (2026-05-30)
         // The Realtime Beta API used flat fields (modalities, input_audio_format,
         // input_audio_transcription, turn_detection, voice) plus an implicit
@@ -551,7 +588,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool, highlightTextTool],
+            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool, highlightTextTool, showScrollAffordanceTool, spotlightRegionTool],
             "tool_choice": "auto",
         ]
 

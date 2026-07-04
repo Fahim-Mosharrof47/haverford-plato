@@ -219,16 +219,21 @@ fn compose_vocabulary_context(skill: &SkillDefinition, progress: &SkillProgress)
     format!("--- UI ELEMENT REFERENCE ---\n{formatted_entries}")
 }
 
+/// Plato highlight/AX-labeling guidance appended to every pointing mode.
+/// MUST stay byte-identical to `highlightGuidance` in SkillPromptComposer.swift
+/// (the Swift fallback composer) — the compose_prompt fixture pins the parity.
+const HIGHLIGHT_GUIDANCE: &str = " Beyond pointing, you can emphasize regions visually. To highlight a region of a document or paper for the user to study or include, call highlight_region (or, once you know the exact visible text, highlight_text). To draw the eye to a single click target, call ripple_here. If the thing the user needs is scrolled off-screen, call show_scroll_affordance with the direction and tell them to scroll; highlight it once it becomes visible. Every highlight only ever ADDS to your spoken answer — always speak normally too. Highlights are momentary; never rely on them persisting. Never say coordinates, colors-as-data, or tool names aloud. When you point at an app control (a button, menu, or icon), give its exact on-screen NAME as the label — Plato uses that name to find and ring the real control precisely. If the action lives only in a menu (e.g. File ▸ Print) with no on-screen button, do NOT point at a guess — say the menu path out loud instead.";
+
 fn pointing_mode_instruction(pointing_mode: PointingMode, target_app: &str) -> String {
     match pointing_mode {
         PointingMode::Always => format!(
-            "When helping with {target_app}, aggressively point at UI elements using the vocabulary above. The user is learning and needs visual guidance. Err on the side of pointing rather than not pointing."
+            "When helping with {target_app}, aggressively point at UI elements using the vocabulary above. The user is learning and needs visual guidance. Err on the side of pointing rather than not pointing.{HIGHLIGHT_GUIDANCE}"
         ),
         PointingMode::WhenRelevant => format!(
-            "When helping with {target_app}, point at UI elements when it would genuinely help the user find something they're looking for. Don't point at things that are obvious or that the user is already looking at."
+            "When helping with {target_app}, point at UI elements when it would genuinely help the user find something they're looking for. Don't point at things that are obvious or that the user is already looking at.{HIGHLIGHT_GUIDANCE}"
         ),
         PointingMode::Minimal => format!(
-            "When helping with {target_app}, only point at UI elements when the user explicitly asks where something is or is clearly lost. Default to verbal descriptions unless pointing adds significant clarity."
+            "When helping with {target_app}, only point at UI elements when the user explicitly asks where something is or is clearly lost. Default to verbal descriptions unless pointing adds significant clarity.{HIGHLIGHT_GUIDANCE}"
         ),
     }
 }

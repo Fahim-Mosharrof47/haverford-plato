@@ -129,4 +129,46 @@ enum CompanionScreenCaptureUtility {
 
         return capturedScreens
     }
+
+    // MARK: - Plato — Fresh native-resolution capture for OCR only
+    /// Captures ONE display (identified by its AppKit frame) at native Retina
+    /// resolution, at the moment of the call. Used exclusively by highlight_text:
+    /// the per-turn 1280px JPEG is both seconds stale (the user may have
+    /// scrolled) and too small for Vision to read paper body text reliably.
+    /// This image is never sent to the model, so resolution costs no tokens.
+    static func captureDisplayImageForOCR(displayFrame: CGRect) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+
+        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
+        for screen in NSScreen.screens {
+            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                nsScreenByDisplayID[screenNumber] = screen
+            }
+        }
+
+        guard let display = content.displays.first(where: {
+            nsScreenByDisplayID[$0.displayID]?.frame == displayFrame
+        }) else {
+            throw NSError(domain: "CompanionScreenCapture", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "No display matches the requested frame"])
+        }
+
+        // Exclude our own overlay/panel windows so a highlight already on screen
+        // never feeds back into the OCR image.
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+        let ownAppWindows = content.windows.filter { window in
+            window.owningApplication?.bundleIdentifier == ownBundleIdentifier
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
+
+        let configuration = SCStreamConfiguration()
+        let backingScaleFactor = nsScreenByDisplayID[display.displayID]?.backingScaleFactor ?? 2.0
+        configuration.width = Int(CGFloat(display.width) * backingScaleFactor)
+        configuration.height = Int(CGFloat(display.height) * backingScaleFactor)
+
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+    }
 }

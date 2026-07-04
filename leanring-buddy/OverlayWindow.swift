@@ -529,10 +529,17 @@ struct BlueCursorView: View {
     }
 
     // MARK: - Plato
-    /// Only draw a highlight on the overlay window whose screen contains the
-    /// highlight's center (matches the cursor's per-screen filter at :444-459).
+    /// Which overlay windows draw a highlight. Zero-size frames (ripples,
+    /// scroll arrows) have no area, so they belong to the screen containing
+    /// their point. Area highlights render on EVERY screen they intersect —
+    /// an AX frame for a window spanning two displays draws both halves
+    /// instead of only the half on the center's screen. The per-screen local
+    /// conversion in PlatoHighlightView already handles each screen's offset.
     private func highlightBelongsOnThisScreen(_ highlight: PlatoHighlight) -> Bool {
-        screenFrame.contains(CGPoint(x: highlight.globalFrame.midX, y: highlight.globalFrame.midY))
+        if highlight.globalFrame.isEmpty {
+            return screenFrame.contains(CGPoint(x: highlight.globalFrame.midX, y: highlight.globalFrame.midY))
+        }
+        return screenFrame.intersects(highlight.globalFrame)
     }
 
     // MARK: - Element Navigation

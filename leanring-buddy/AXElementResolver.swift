@@ -10,15 +10,24 @@
 //  Plato already holds (no new TCC prompt).
 //
 //  Two strategies:
-//   - controlFrame(matchingLabel:) — PRIMARY. Search the FRONTMOST app's AX tree
-//     for a control whose title/description matches the model's label ("Print").
-//     Robust to a grossly-wrong coordinate guess: finds the control by NAME.
+//   - controlFrame(matchingLabel:near:) — PRIMARY. Search the FRONTMOST app's AX
+//     tree for controls whose title/description matches the model's label
+//     ("Print"), then rank the candidates (exact > prefix > substring, on-screen
+//     only, nearest to the model's approximate point) via AXCandidateScoring.
+//     Declines on a genuine tie — wrong-target pointing is worse than none.
 //   - elementFrameAtAppKitPoint(_:) — secondary hit-test under a point.
 //
 //  COORDINATE FACTS (verified): AX geometry is global TOP-LEFT-origin POINTS
 //  anchored to the PRIMARY screen — no backingScaleFactor. AXUIElementCopy-
 //  ElementAtPosition takes C Float (must cast). The AX API is NOT thread-safe:
 //  every call runs on the main thread (this enum is @MainActor).
+//
+//  BUDGETS: the tree walk is bounded three ways — a node budget (2000), a max
+//  depth (60), and a WALL-CLOCK deadline (0.2s). The messaging timeout is set on
+//  the system-wide element, which per the AX contract applies it to every
+//  AXUIElementRef this process creates (setting it only on the app root would
+//  leave child refs on the ~6s global default — a slow Electron app could then
+//  stall the main thread for seconds per call).
 //
 
 import AppKit
@@ -27,6 +36,12 @@ import ApplicationServices
 @MainActor
 enum AXElementResolver {
 
+    /// Max wall-clock time the label search may spend walking the AX tree.
+    private static let treeWalkDeadlineSeconds: TimeInterval = 0.2
+
+    /// Per-message AX IPC timeout, applied process-wide via the system-wide element.
+    private static let messagingTimeoutSeconds: Float = 0.25
+
     /// Height of the primary (menu-bar, origin == .zero) screen — the AX flip reference.
     static func primaryScreenHeight() -> CGFloat {
         NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
@@ -34,30 +49,45 @@ enum AXElementResolver {
             ?? 0
     }
 
-    /// PRIMARY: searches the frontmost app's AX tree for a pointable control whose
-    /// title/description/help contains `label` (case-insensitive), returning its
-    /// global AppKit frame. nil if not found or the app is AX-blind. Bounded by a
-    /// node budget + max depth; a short messaging timeout keeps a slow app from
-    /// stalling the main thread.
-    static func controlFrame(matchingLabel label: String) -> CGRect? {
+    /// Applies the short messaging timeout to EVERY AXUIElementRef this process
+    /// creates (system-wide element semantics), so no single hung element can
+    /// block the main thread for the ~6s global default.
+    private static func applyProcessWideMessagingTimeout() {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWideElement, messagingTimeoutSeconds)
+    }
+
+    /// PRIMARY: searches the frontmost app's AX tree for pointable controls whose
+    /// title/description/help contains `label` (case-insensitive), then returns
+    /// the best-ranked candidate's global AppKit frame (see AXCandidateScoring).
+    /// nil when nothing matches, the app is AX-blind, or the best two candidates
+    /// are too close to call. `approximatePoint` is the model's guessed location
+    /// (global AppKit), used only to rank same-quality name matches.
+    static func controlFrame(matchingLabel label: String, near approximatePoint: CGPoint?) -> CGRect? {
         let primaryHeight = primaryScreenHeight()
         guard primaryHeight > 0 else { return nil }
         let normalizedQuery = label.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalizedQuery.count >= 2 else { return nil }
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
 
+        applyProcessWideMessagingTimeout()
         let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
-        AXUIElementSetMessagingTimeout(appElement, 0.25)
+        AXUIElementSetMessagingTimeout(appElement, messagingTimeoutSeconds)
 
+        // kAXMenuItemRole is deliberately absent: a CLOSED menu's items still
+        // report plausible frames, so a name match there rings a control that
+        // isn't visible. The prompt tells the model to speak menu paths instead.
         let pointableRoles: Set<String> = [
-            kAXButtonRole, kAXMenuButtonRole, kAXPopUpButtonRole, kAXMenuItemRole,
+            kAXButtonRole, kAXMenuButtonRole, kAXPopUpButtonRole,
             kAXMenuBarItemRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXImageRole
         ]
         let titleAttributes = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute]
         var remainingNodeBudget = 2000
+        let walkDeadline = Date().addingTimeInterval(treeWalkDeadlineSeconds)
+        var matchingCandidates: [AXControlCandidate] = []
 
-        func search(_ element: AXUIElement, depth: Int) -> CGRect? {
-            if remainingNodeBudget <= 0 || depth > 60 { return nil }
+        func search(_ element: AXUIElement, depth: Int) {
+            if remainingNodeBudget <= 0 || depth > 60 || Date() >= walkDeadline { return }
             remainingNodeBudget -= 1
 
             if let role = stringAttribute(element, kAXRoleAttribute), pointableRoles.contains(role) {
@@ -65,17 +95,25 @@ enum AXElementResolver {
                     if let text = stringAttribute(element, attribute),
                        text.lowercased().contains(normalizedQuery),
                        let frame = frameOfElement(element, primaryHeight: primaryHeight) {
-                        return frame
+                        matchingCandidates.append(AXControlCandidate(matchedText: text, globalFrame: frame))
+                        break
                     }
                 }
             }
-            guard let children = childElements(element) else { return nil }
+            guard let children = childElements(element) else { return }
             for child in children {
-                if let found = search(child, depth: depth + 1) { return found }
+                if remainingNodeBudget <= 0 || Date() >= walkDeadline { return }
+                search(child, depth: depth + 1)
             }
-            return nil
         }
-        return search(appElement, depth: 0)
+        search(appElement, depth: 0)
+
+        return AXCandidateScoring.bestCandidate(
+            among: matchingCandidates,
+            normalizedQuery: normalizedQuery,
+            approximatePoint: approximatePoint,
+            visibleScreenFrames: NSScreen.screens.map { $0.frame }
+        )?.globalFrame
     }
 
     /// SECONDARY: hit-tests the element under a GLOBAL AppKit point and returns its
@@ -89,6 +127,7 @@ enum AXElementResolver {
         let topLeftY = Float(primaryHeight - appKitPoint.y)
 
         let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, messagingTimeoutSeconds)
         var hitElement: AXUIElement?
         let hitStatus = AXUIElementCopyElementAtPosition(systemWide, topLeftX, topLeftY, &hitElement)
         guard hitStatus == .success, let element = hitElement else { return nil }

@@ -19,7 +19,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **AI Pipeline**: OpenAI Realtime API via WebSocket (`gpt-4o-realtime-preview`) — single connection handles audio streaming, transcription, vision, chat, and TTS
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + `appendAudioChunk()` to OpenAI Realtime. System-wide keyboard shortcut via an active (`.defaultTap`) CGEvent tap that consumes the shortcut's own key events.
-- **Element Pointing**: AI embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target. Edge-proximity check suppresses animation when coordinates are within 5% of any screen edge.
+- **Element Pointing**: AI embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target. Coordinates that fall outside the screenshot by more than a 2% tolerance are declined (no pointing) instead of being clamped to a screen edge (`HighlightGeometry.globalPointFromScreenshotPixel`). The preferred path is the `point_at_element` tool; when a control name is given, the real control frame is resolved via the Accessibility API (`AXElementResolver` + `AXCandidateScoring`) and ringed precisely.
 - **Auth**: WorkOS AuthKit via browser → `skilly://auth/callback` deep link → Keychain session storage
 - **Skill System**: SKILL.md files parsed at runtime, layered into system prompt with curriculum tracking
 - **Concurrency**: `@MainActor` isolation, async/await throughout

@@ -16,10 +16,52 @@ import CoreGraphics
 
 enum HighlightGeometry {
 
+    /// How far outside the screenshot a coordinate may fall (as a fraction of
+    /// the image dimension) before it is treated as hallucinated and declined
+    /// instead of clamped. Small overshoot is normal model rounding; a
+    /// coordinate way outside the image means the model made the point up, and
+    /// clamping it to a screen edge points confidently at nothing.
+    static let outOfRangePixelTolerance: CGFloat = 0.02
+
+    /// Screenshot pixel point (top-left origin) -> global AppKit point
+    /// (bottom-left origin), or nil when the coordinates fall outside the
+    /// screenshot by more than `outOfRangePixelTolerance` (decline > mis-point).
+    /// The single source of truth for point mapping — CompanionManager used to
+    /// carry a duplicate of this math.
+    static func globalPointFromScreenshotPixel(
+        x: Int, y: Int,
+        screenshotWidthInPixels: Int, screenshotHeightInPixels: Int,
+        displayFrame: CGRect
+    ) -> CGPoint? {
+        let safeWidthInPixels = max(screenshotWidthInPixels, 1)
+        let safeHeightInPixels = max(screenshotHeightInPixels, 1)
+
+        let xToleranceInPixels = CGFloat(safeWidthInPixels) * outOfRangePixelTolerance
+        let yToleranceInPixels = CGFloat(safeHeightInPixels) * outOfRangePixelTolerance
+        guard CGFloat(x) >= -xToleranceInPixels,
+              CGFloat(x) <= CGFloat(screenshotWidthInPixels) + xToleranceInPixels,
+              CGFloat(y) >= -yToleranceInPixels,
+              CGFloat(y) <= CGFloat(screenshotHeightInPixels) + yToleranceInPixels else {
+            return nil
+        }
+
+        let clampedXInPixels = max(0, min(x, screenshotWidthInPixels))
+        let clampedYInPixels = max(0, min(y, screenshotHeightInPixels))
+
+        let normalizedX = CGFloat(clampedXInPixels) / CGFloat(safeWidthInPixels)
+        let normalizedY = CGFloat(clampedYInPixels) / CGFloat(safeHeightInPixels)
+
+        let globalX = displayFrame.minX + (displayFrame.width * normalizedX)
+        // The screenshot's TOP edge maps to a HIGH AppKit Y (bottom-left origin).
+        let globalY = displayFrame.maxY - (displayFrame.height * normalizedY)
+        return CGPoint(x: globalX, y: globalY)
+    }
+
     /// Screenshot pixel rect (top-left origin) -> global AppKit rect (bottom-left
-    /// origin). Mirrors CompanionManager.mapScreenshotPixelCoordinateToGlobalScreenPoint
-    /// but for a rect: width/height scale by the same normalization factor as x/y
-    /// because all four originate in the same screenshot pixel space.
+    /// origin). Width/height scale by the same normalization factor as x/y
+    /// because all four originate in the same screenshot pixel space. The rect
+    /// is clamped INSIDE the image (origin and extent), so the resulting global
+    /// rect never runs past the display edge.
     static func globalRectFromScreenshotPixelRect(
         x: Int, y: Int, width: Int, height: Int,
         screenshotWidthInPixels: Int, screenshotHeightInPixels: Int,
@@ -30,11 +72,15 @@ enum HighlightGeometry {
 
         let clampedX = max(0, min(x, screenshotWidthInPixels))
         let clampedY = max(0, min(y, screenshotHeightInPixels))
+        // Clamp the far edge too: x+width beyond the image would otherwise map
+        // to a box visually running off the display.
+        let clampedWidth = max(0, min(width, screenshotWidthInPixels - clampedX))
+        let clampedHeight = max(0, min(height, screenshotHeightInPixels - clampedY))
 
         let normalizedX = CGFloat(clampedX) / CGFloat(safeWidthInPixels)
         let normalizedY = CGFloat(clampedY) / CGFloat(safeHeightInPixels)
-        let normalizedWidth = CGFloat(max(0, width)) / CGFloat(safeWidthInPixels)
-        let normalizedHeight = CGFloat(max(0, height)) / CGFloat(safeHeightInPixels)
+        let normalizedWidth = CGFloat(clampedWidth) / CGFloat(safeWidthInPixels)
+        let normalizedHeight = CGFloat(clampedHeight) / CGFloat(safeHeightInPixels)
 
         let globalX = displayFrame.minX + (displayFrame.width * normalizedX)
         // The screenshot's TOP edge maps to a HIGH AppKit Y (bottom-left origin).

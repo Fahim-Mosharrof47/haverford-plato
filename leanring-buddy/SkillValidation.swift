@@ -125,6 +125,13 @@ enum SkillValidation {
         "\u{180E}",  // Mongolian vowel separator
     ]
 
+    // MARK: - Plato — Inline visual-directive tags a skill must never contain.
+    // A literal tag in any prompt-visible field can coax the model into emitting
+    // one, and the legacy fallback parser acts on emitted tags on tool-less turns.
+    private static let bannedDirectiveTags = [
+        "[point:", "[highlight:", "[ripple:", "[scroll:", "[spotlight:"
+    ]
+
     /// Normalizes text by stripping invisible characters and replacing homoglyphs
     /// with their ASCII equivalents before banned-pattern scanning.
     static func normalizeForDetection(_ text: String) -> String {
@@ -157,6 +164,19 @@ enum SkillValidation {
                 violations.append(bannedEntry.reason)
             } else if normalizedInstructions.contains(bannedEntry.phrase) {
                 violations.append("\(bannedEntry.reason) (obfuscated)")
+            }
+        }
+
+        // MARK: - Plato — Ban inline visual-directive tags in EVERY scanned field.
+        // This runs on teaching instructions, description, goals, signals, and
+        // vocabulary names/descriptions (they all route through here), so a skill
+        // can't smuggle a literal [POINT:...] tag the legacy fallback parser
+        // would act on during tool-less turns.
+        for bannedTag in bannedDirectiveTags {
+            if lowercasedInstructions.contains(bannedTag) || normalizedInstructions.contains(bannedTag) {
+                violations.append(
+                    "Contains \(bannedTag.uppercased()) directive tag pattern, which is not allowed"
+                )
             }
         }
 
@@ -253,15 +273,8 @@ enum SkillValidation {
                 "Vocabulary entry '\(escapedVocabularyName)' name: \($0)"
             })
 
-            let lowercasedVocabularyName = vocabularyEntry.name.lowercased()
-            // MARK: - Plato — also ban the highlight directive tags
-            let bannedDirectiveTags = ["[point:", "[highlight:", "[ripple:", "[scroll:", "[spotlight:"]
-            for bannedTag in bannedDirectiveTags where lowercasedVocabularyName.contains(bannedTag) {
-                violations.append(
-                    "Vocabulary entry '\(escapedVocabularyName)' name: contains \(bannedTag.uppercased()) tag pattern, which is not allowed"
-                )
-            }
-
+            // The directive-tag ban now lives in validateTeachingInstructions, so the
+            // name check above already covers it (along with every other scanned field).
             let vocabularyDescriptionCheckResult = validateTeachingInstructions(vocabularyEntry.description)
             violations.append(contentsOf: vocabularyDescriptionCheckResult.violations.map {
                 "Vocabulary entry '\(escapedVocabularyName)' description: \($0)"
