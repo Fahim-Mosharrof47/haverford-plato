@@ -45,6 +45,12 @@ struct RealtimeTurnRow: Codable {
     let vision_used: Bool
     let vision_tokens: Int?
 
+    // MARK: - Plato — Per-turn pointing rollup (anchor paths, decline gates,
+    // where-is intent). nil for turns with no pointing signal. This is the
+    // local, always-on counterpart of the PostHog point_* events, so pointing
+    // is measurable even when analytics is disabled.
+    let pointing: PointingTurnSummaryRow?
+
     enum CodingKeys: String, CodingKey {
         case session_id, turn_index, timestamp, model
         case audio_input_tokens, audio_output_tokens
@@ -53,6 +59,7 @@ struct RealtimeTurnRow: Codable {
         case usage_raw
         case turn_latency_ms, user_speech_duration_ms, assistant_speech_duration_ms
         case vision_used, vision_tokens
+        case pointing
     }
 }
 
@@ -168,6 +175,9 @@ final class RealtimeTelemetry: ObservableObject {
     private var assistantSpeechEndTime: Date?
     private var visionUsed: Bool = false
     private var visionTokens: Int?
+    // MARK: - Plato — set via recordPointingSummary before endTurn, consumed
+    // into the turn row and reset with the rest of the per-turn state.
+    private var pendingPointingSummary: PointingTurnSummaryRow?
 
     // Accumulator for session summary
     private var totalAudioInputTokens: Int = 0
@@ -294,6 +304,12 @@ final class RealtimeTelemetry: ObservableObject {
         visionTokens = tokens
     }
 
+    // MARK: - Plato — Call just before endTurn with the turn's pointing
+    /// rollup (nil-safe: turns without pointing signal simply never call it).
+    func recordPointingSummary(_ summaryRow: PointingTurnSummaryRow) {
+        pendingPointingSummary = summaryRow
+    }
+
     /// Call when the turn is complete (response.done received).
     func endTurn(usage: RealtimeUsage?) {
         guard let sessionId, let turnStart = turnStartTime else { return }
@@ -339,7 +355,8 @@ final class RealtimeTelemetry: ObservableObject {
             user_speech_duration_ms: userSpeechMs,
             assistant_speech_duration_ms: assistantSpeechMs,
             vision_used: visionUsed,
-            vision_tokens: visionTokens
+            vision_tokens: visionTokens,
+            pointing: pendingPointingSummary
         )
 
         // Accumulate for summary
@@ -388,11 +405,15 @@ final class RealtimeTelemetry: ObservableObject {
         assistantSpeechEndTime = nil
         visionUsed = false
         visionTokens = nil
+        pendingPointingSummary = nil
     }
 
     /// Call at the start of a new turn (before user speaks).
     func beginTurn() {
         turnStartTime = Date()
+        // MARK: - Plato — a cancelled turn never reaches endTurn; drop its
+        // pending pointing summary so it can't attach to the next turn's row.
+        pendingPointingSummary = nil
     }
 
     // MARK: - Private

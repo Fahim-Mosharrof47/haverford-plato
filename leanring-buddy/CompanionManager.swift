@@ -220,6 +220,12 @@ final class CompanionManager: ObservableObject {
     private var didReceiveAnyAudioChunkForCurrentTurn = false
     private var pendingToolCallIdForCurrentTurn: String?
     private var isAwaitingForcedSpokenFollowUp = false
+    // MARK: - Plato — Per-turn pointing instrumentation (root-cause report
+    // 2026-07-07, cause X2: three fix rounds tuned pointing blind). Every
+    // rendered visual records WHICH anchor path produced it and every decline
+    // gate records that it fired; the rollup lands in the telemetry turn row
+    // and PostHog at response.done. Reset with the other per-turn state.
+    private var currentTurnPointingMetrics = PointingTurnMetrics()
     // MARK: - Plato — Set while a focus block is being started by a voice command, so the
     // onWorkStart announcement is suppressed (the tool continuation speaks the confirmation).
     private var isVoiceInitiatedPomodoroStart = false
@@ -1695,23 +1701,61 @@ final class CompanionManager: ObservableObject {
     // PointDirectiveParsing.swift so the malformed-model-output surface is
     // unit-testable (review findings D-09/D-10/D-11).
 
+    // MARK: - Plato — Pointing instrumentation recorders. Central funnel for
+    // every rendered visual and every silent decline: accumulates into the
+    // per-turn metrics (→ telemetry turn row) and fires the per-event PostHog
+    // events. The DEBUG prints make declines visible live — previously a
+    // declined point was byte-for-byte indistinguishable from "the model
+    // never pointed".
+    private func recordPointOutcome(_ outcome: PointOutcome, elementLabel: String?) {
+        currentTurnPointingMetrics.record(outcome)
+        SkillyAnalytics.trackPointOutcome(outcome, elementLabel: elementLabel)
+        #if DEBUG
+        let offsetDescription = outcome.offsetFromModelGuessInPoints
+            .map { String(format: "%.1fpt", $0) } ?? "-"
+        print("📍 point outcome: \(outcome.path.rawValue) ring=\(outcome.drewRing) cursor=\(outcome.movedCursor) offset=\(offsetDescription) label=\(elementLabel ?? "-")")
+        #endif
+    }
+
+    private func recordPointDecline(_ gate: PointDeclineGate, hadModelPoint: Bool, elementLabel: String?) {
+        let decline = PointDecline(gate: gate, hadModelPoint: hadModelPoint)
+        currentTurnPointingMetrics.record(decline)
+        SkillyAnalytics.trackPointDeclined(decline, elementLabel: elementLabel)
+        #if DEBUG
+        print("🚫 point declined: \(gate.rawValue) hadModelPoint=\(hadModelPoint) label=\(elementLabel ?? "-")")
+        #endif
+    }
+
     private func applyPointDirectiveIfPresent(in fullModelResponseText: String) {
-        guard let parsedPointDirective = PointDirectiveParser.parse(from: fullModelResponseText),
-              let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
-                  for: parsedPointDirective, in: currentTurnScreenCaptures
-              ),
-              let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(
-                  screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
-                  screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
-                  screenCapture: targetScreenCapture
-              ) else {
+        // No [POINT] tag at all is the normal case for most turns — only a
+        // present-but-undeliverable tag is a decline worth recording.
+        guard let parsedPointDirective = PointDirectiveParser.parse(from: fullModelResponseText) else {
+            return
+        }
+        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            for: parsedPointDirective, in: currentTurnScreenCaptures
+        ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false,
+                               elementLabel: parsedPointDirective.elementLabel)
+            return
+        }
+        guard let screenLocation = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+            screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
+            screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
+            screenCapture: targetScreenCapture
+        ) else {
+            recordPointDecline(.outOfBoundsNoResolve, hadModelPoint: false,
+                               elementLabel: parsedPointDirective.elementLabel)
             return
         }
 
         detectedElementScreenLocation = screenLocation
         detectedElementDisplayFrame = targetScreenCapture.displayFrame
         detectedElementBubbleText = parsedPointDirective.elementLabel
-        SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+        recordPointOutcome(PointOutcome(
+            path: .rawInline, drewRing: false, movedCursor: true,
+            resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
+        ), elementLabel: parsedPointDirective.elementLabel)
     }
 
     // MARK: - Plato — outcome of the synchronous phase of a point directive.
@@ -1761,6 +1805,7 @@ final class CompanionManager: ObservableObject {
             #if DEBUG
             print("⚠️ point_at_element: could not parse arguments JSON")
             #endif
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
@@ -1772,6 +1817,7 @@ final class CompanionManager: ObservableObject {
         } else if let doubleX = parsedArguments["x"] as? Double {
             screenshotXInPixels = Int(doubleX)
         } else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return .declinedSynchronously(reason: "could not read the pointing request")
         }
         if let integerY = parsedArguments["y"] as? Int {
@@ -1779,12 +1825,14 @@ final class CompanionManager: ObservableObject {
         } else if let doubleY = parsedArguments["y"] as? Double {
             screenshotYInPixels = Int(doubleY)
         } else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
         guard let elementLabel = (parsedArguments["label"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !elementLabel.isEmpty else {
+            recordPointDecline(.missingLabel, hadModelPoint: false, elementLabel: nil)
             return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
@@ -1806,6 +1854,7 @@ final class CompanionManager: ObservableObject {
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: parsedPointDirective, in: currentTurnScreenCaptures
         ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: elementLabel)
             return .declinedSynchronously(reason: "could not read the pointing request")
         }
 
@@ -1819,9 +1868,10 @@ final class CompanionManager: ObservableObject {
         )
 
         // MARK: - Plato — prefer the real control frame (by name) over guessed pixels
-        if let controlFrame = resolveControlGlobalFrame(
+        if let resolvedControl = resolveControlGlobalFrame(
             label: parsedPointDirective.elementLabel, approximatePoint: modelPoint
         ) {
+            let controlFrame = resolvedControl.frame
             // Anchor the animation to the screen that actually CONTAINS the
             // resolved control — the AX match may sit on a different display
             // than the one the model designated (its screen guess can be wrong
@@ -1837,7 +1887,12 @@ final class CompanionManager: ObservableObject {
                 kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
                 globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
                 createdAt: Date(), timeToLive: 4.0))
-            SkillyAnalytics.trackElementPointed(elementLabel: parsedPointDirective.elementLabel)
+            recordPointOutcome(PointOutcome(
+                path: resolvedControl.path, drewRing: true, movedCursor: true,
+                resolvedFrameArea: Double(controlFrame.width * controlFrame.height),
+                offsetFromModelGuessInPoints: PointingGeometryMetrics.offsetInPoints(
+                    fromModelGuess: modelPoint, toResolvedCenter: controlCenter)
+            ), elementLabel: parsedPointDirective.elementLabel)
             return .resolvedSynchronously
         }
 
@@ -1845,6 +1900,8 @@ final class CompanionManager: ObservableObject {
         // decline (no pointing) rather than fly to a clamped screen edge. With no
         // in-bounds guess there is also nothing to anchor an OCR-miss hedge to.
         guard let modelPoint else {
+            recordPointDecline(.outOfBoundsNoResolve, hadModelPoint: false,
+                               elementLabel: parsedPointDirective.elementLabel)
             return .declinedSynchronously(
                 reason: honestLocateFailureReason(for: parsedPointDirective.elementLabel))
         }
@@ -1894,6 +1951,8 @@ final class CompanionManager: ObservableObject {
             guard generationAtRequest == self.highlightGeneration else {
                 // The turn moved on (new turn, scroll, display change) while OCR
                 // ran — pointing now would ring the wrong content.
+                self.recordPointDecline(.screenChangedMidResolve,
+                                        hadModelPoint: modelPoint != nil, elementLabel: searchLabel)
                 self.openAIRealtimeClient.sendFunctionCallOutput(
                     callId: callId,
                     output: #"{"ok":false,"reason":"the screen changed before pointing"}"#
@@ -1916,18 +1975,31 @@ final class CompanionManager: ObservableObject {
                     kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
                     globalFrame: globalFrame, label: searchLabel,
                     createdAt: Date(), timeToLive: 4.0))
-                SkillyAnalytics.trackElementPointed(elementLabel: searchLabel)
+                self.recordPointOutcome(PointOutcome(
+                    path: .ocrMatch, drewRing: true, movedCursor: true,
+                    resolvedFrameArea: Double(globalFrame.width * globalFrame.height),
+                    offsetFromModelGuessInPoints: PointingGeometryMetrics.offsetInPoints(
+                        fromModelGuess: modelPoint, toResolvedCenter: controlCenter)
+                ), elementLabel: searchLabel)
                 self.openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
                 return
             }
 
             // OCR miss: honest degrade — move the cursor to the in-bounds guess
             // with a hedged bubble and NO ring, or decline entirely if no guess.
+            // (If response.done already flushed this turn's rollup, these records
+            // still fire as individual PostHog events — only the JSONL row for
+            // this turn misses them.)
             if let modelPoint {
                 self.detectedElementScreenLocation = modelPoint
                 self.detectedElementDisplayFrame = displayFrame
                 self.detectedElementBubbleText = "around here — \(searchLabel)"
-                SkillyAnalytics.trackElementPointed(elementLabel: searchLabel)
+                self.recordPointOutcome(PointOutcome(
+                    path: .hedgeNoRing, drewRing: false, movedCursor: true,
+                    resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
+                ), elementLabel: searchLabel)
+            } else {
+                self.recordPointDecline(.ocrNotFound, hadModelPoint: false, elementLabel: searchLabel)
             }
             self.openAIRealtimeClient.sendFunctionCallOutput(
                 callId: callId,
@@ -1938,16 +2010,21 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
     // over the model's guessed pixels. nil → caller falls back to model coordinates.
-    private func resolveControlGlobalFrame(label: String, approximatePoint: CGPoint?) -> CGRect? {
+    // Also reports WHICH resolver hit (name walk vs point hit-test) so the anchor
+    // path is measurable per outcome.
+    private func resolveControlGlobalFrame(
+        label: String, approximatePoint: CGPoint?
+    ) -> (frame: CGRect, path: PointAnchorPath)? {
         let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedLabel.isEmpty,
            let frameByName = AXElementResolver.controlFrame(matchingLabel: trimmedLabel, near: approximatePoint) {
-            return frameByName
+            return (frameByName, .axName)
         }
         // Secondary: the element directly under the model's guessed point (only
         // helps when the guess already landed on the right control).
         guard let approximatePoint else { return nil }
         return AXElementResolver.elementFrameAtAppKitPoint(approximatePoint, matchingLabel: trimmedLabel)
+            .map { ($0, .axHitTest) }
     }
 
     // MARK: - Plato — Tool argument decoding helpers (shared by highlight tools)
@@ -1973,6 +2050,7 @@ final class CompanionManager: ObservableObject {
               let y = integerValue(from: arguments["y"]),
               let width = integerValue(from: arguments["width"]),
               let height = integerValue(from: arguments["height"]) else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return
         }
         let colorName = arguments["color"] as? String
@@ -1987,7 +2065,10 @@ final class CompanionManager: ObservableObject {
         )
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: resolverDirective, in: currentTurnScreenCaptures
-        ) else { return }
+        ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: label)
+            return
+        }
 
         let globalFrame = HighlightGeometry.globalRectFromScreenshotPixelRect(
             x: x, y: y, width: width, height: height,
@@ -2005,10 +2086,18 @@ final class CompanionManager: ObservableObject {
                 screenshotYInPixels: y + (height / 2),
                 screenCapture: targetScreenCapture
             )
-            if let axFrame = resolveControlGlobalFrame(label: label ?? "", approximatePoint: centerPoint) {
+            if let resolvedControl = resolveControlGlobalFrame(label: label ?? "", approximatePoint: centerPoint) {
+                let axFrame = resolvedControl.frame
                 addHighlight(PlatoHighlight(
                     kind: .strokedRegion(color: PlatoHighlight.color(forName: colorName), lineWidth: 2.5),
                     globalFrame: axFrame, label: label, createdAt: Date(), timeToLive: 4.0))
+                recordPointOutcome(PointOutcome(
+                    path: resolvedControl.path, drewRing: true, movedCursor: false,
+                    resolvedFrameArea: Double(axFrame.width * axFrame.height),
+                    offsetFromModelGuessInPoints: PointingGeometryMetrics.offsetInPoints(
+                        fromModelGuess: centerPoint,
+                        toResolvedCenter: CGPoint(x: axFrame.midX, y: axFrame.midY))
+                ), elementLabel: label)
                 return
             }
             // AX couldn't resolve (canvas/GPU app, no element) — fall through to the model bbox.
@@ -2021,6 +2110,11 @@ final class CompanionManager: ObservableObject {
 
         addHighlight(PlatoHighlight(kind: kind, globalFrame: globalFrame,
                                     label: label, createdAt: Date(), timeToLive: 4.0))
+        recordPointOutcome(PointOutcome(
+            path: .rawRegion, drewRing: true, movedCursor: false,
+            resolvedFrameArea: Double(globalFrame.width * globalFrame.height),
+            offsetFromModelGuessInPoints: nil
+        ), elementLabel: label)
     }
 
     // MARK: - Plato — ripple_here handler
@@ -2028,6 +2122,7 @@ final class CompanionManager: ObservableObject {
         guard let arguments = decodeToolArguments(argumentsJSON),
               let x = integerValue(from: arguments["x"]),
               let y = integerValue(from: arguments["y"]) else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return
         }
         let label = (arguments["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2039,17 +2134,27 @@ final class CompanionManager: ObservableObject {
         )
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: resolverDirective, in: currentTurnScreenCaptures
-        ) else { return }
+        ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: label)
+            return
+        }
 
         // Hallucinated coordinates decline the ripple (never pulse at a clamped edge).
         guard let globalPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
             screenshotXInPixels: x, screenshotYInPixels: y, screenCapture: targetScreenCapture
-        ) else { return }
+        ) else {
+            recordPointDecline(.outOfBoundsNoResolve, hadModelPoint: false, elementLabel: label)
+            return
+        }
         // Zero-size rect: the ripple view centers on its midpoint.
         let globalFrame = CGRect(x: globalPoint.x, y: globalPoint.y, width: 0, height: 0)
         addHighlight(PlatoHighlight(kind: .ripplePulse(color: PlatoHighlight.color(forName: "blue")),
                                     globalFrame: globalFrame, label: label,
                                     createdAt: Date(), timeToLive: 4.0))
+        recordPointOutcome(PointOutcome(
+            path: .rawPoint, drewRing: true, movedCursor: false,
+            resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
+        ), elementLabel: label)
     }
 
     // MARK: - Plato — highlight_text handler (async OCR)
@@ -2063,6 +2168,7 @@ final class CompanionManager: ObservableObject {
         guard let arguments = decodeToolArguments(argumentsJSON),
               let searchText = (arguments["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !searchText.isEmpty else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             openAIRealtimeClient.sendFunctionCallOutput(
                 callId: callId,
                 output: #"{"ok":false,"reason":"missing or empty text argument"}"#
@@ -2080,6 +2186,7 @@ final class CompanionManager: ObservableObject {
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: resolverDirective, in: currentTurnScreenCaptures
         ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: label ?? searchText)
             openAIRealtimeClient.sendFunctionCallOutput(
                 callId: callId,
                 output: #"{"ok":false,"reason":"no screenshot exists for that screen"}"#
@@ -2116,6 +2223,8 @@ final class CompanionManager: ObservableObject {
                 guard generationAtRequest == self.highlightGeneration else {
                     // The turn moved on (new turn, scroll, display change) while
                     // OCR ran — drawing now would shade the wrong content.
+                    self.recordPointDecline(.screenChangedMidResolve,
+                                            hadModelPoint: false, elementLabel: label ?? searchText)
                     self.openAIRealtimeClient.sendFunctionCallOutput(
                         callId: callId,
                         output: #"{"ok":false,"reason":"the screen changed before the highlight could render"}"#
@@ -2130,15 +2239,24 @@ final class CompanionManager: ObservableObject {
                     globalFrame: globalFrame, label: label,
                     createdAt: Date(), timeToLive: 5.0
                 ))
+                self.recordPointOutcome(PointOutcome(
+                    path: .ocrMatch, drewRing: true, movedCursor: false,
+                    resolvedFrameArea: Double(globalFrame.width * globalFrame.height),
+                    offsetFromModelGuessInPoints: nil
+                ), elementLabel: label ?? searchText)
                 self.openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: #"{"ok":true}"#)
             case .ambiguous(let matchCount):
                 // Continue (not just close) so the model verbally recovers
                 // instead of having silently claimed a highlight it never drew.
+                self.recordPointDecline(.ocrAmbiguous, hadModelPoint: false,
+                                        elementLabel: label ?? searchText)
                 self.openAIRealtimeClient.sendToolResultAndContinue(
                     callId: callId,
                     output: #"{"ok":false,"reason":"that text appears in \#(matchCount) places on screen — tell the user, and retry with a longer, unique phrase"}"#
                 )
             case .notFound:
+                self.recordPointDecline(.ocrNotFound, hadModelPoint: false,
+                                        elementLabel: label ?? searchText)
                 self.openAIRealtimeClient.sendToolResultAndContinue(
                     callId: callId,
                     output: #"{"ok":false,"reason":"that text was not found on screen — it may be scrolled out of view; tell the user where to scroll instead"}"#
@@ -2153,6 +2271,7 @@ final class CompanionManager: ObservableObject {
     private func applyScrollAffordanceDirective(argumentsJSON: String) {
         guard let arguments = decodeToolArguments(argumentsJSON),
               let directionName = (arguments["direction"] as? String)?.lowercased() else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return
         }
         let direction: PlatoHighlight.ArrowDirection
@@ -2170,7 +2289,10 @@ final class CompanionManager: ObservableObject {
         )
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: resolverDirective, in: currentTurnScreenCaptures
-        ) else { return }
+        ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: label)
+            return
+        }
 
         // Place the arrow near the relevant edge of the target display.
         let frame = targetScreenCapture.displayFrame
@@ -2186,6 +2308,10 @@ final class CompanionManager: ObservableObject {
             kind: .directionalArrow(direction: direction, color: PlatoHighlight.color(forName: "blue")),
             globalFrame: globalFrame, label: label, createdAt: Date(), timeToLive: 4.0
         ))
+        recordPointOutcome(PointOutcome(
+            path: .rawPoint, drewRing: true, movedCursor: false,
+            resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
+        ), elementLabel: label)
     }
 
     // MARK: - Plato — spotlight_region handler
@@ -2196,6 +2322,7 @@ final class CompanionManager: ObservableObject {
               let y = integerValue(from: arguments["y"]),
               let width = integerValue(from: arguments["width"]),
               let height = integerValue(from: arguments["height"]) else {
+            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
             return
         }
         let oneBasedScreenNumber = integerValue(from: arguments["screen"])
@@ -2205,7 +2332,10 @@ final class CompanionManager: ObservableObject {
         )
         guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
             for: resolverDirective, in: currentTurnScreenCaptures
-        ) else { return }
+        ) else {
+            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: nil)
+            return
+        }
         let globalFrame = HighlightGeometry.globalRectFromScreenshotPixelRect(
             x: x, y: y, width: width, height: height,
             screenshotWidthInPixels: targetScreenCapture.screenshotWidthInPixels,
@@ -2216,6 +2346,11 @@ final class CompanionManager: ObservableObject {
         clearAllHighlights()
         addHighlight(PlatoHighlight(kind: .spotlight(dimOpacity: 0.45), globalFrame: globalFrame,
                                     label: nil, createdAt: Date(), timeToLive: 4.0))
+        recordPointOutcome(PointOutcome(
+            path: .rawRegion, drewRing: true, movedCursor: false,
+            resolvedFrameArea: Double(globalFrame.width * globalFrame.height),
+            offsetFromModelGuessInPoints: nil
+        ), elementLabel: nil)
     }
 
     /// Delegates to the single source of truth in HighlightGeometry (the math
@@ -2314,6 +2449,7 @@ final class CompanionManager: ObservableObject {
         pendingToolCallIdForCurrentTurn = nil
         isAwaitingForcedSpokenFollowUp = false
         isWaitingForRealtimeAudioQueueDrain = false
+        currentTurnPointingMetrics = PointingTurnMetrics()
         // MARK: - Plato — drop last turn's highlights before a new turn
         clearAllHighlights()
         // MARK: - Skilly — Record turn start for usage tracking (key press → response.done)
@@ -2576,6 +2712,10 @@ final class CompanionManager: ObservableObject {
             // What the user said (STT result)
             lastTranscript = transcript
             currentTurnUserTranscript = transcript
+            // MARK: - Plato — tag locate-intent turns so the "asked where,
+            // only talked" rate is computable (Symptom-2 denominator).
+            currentTurnPointingMetrics.whereIsIntent =
+                WhereIsIntentClassifier.isWhereIsQuestion(transcript)
             SkillyAnalytics.trackUserMessageSent(transcript: transcript)
 
         case .responseDone(let usage):
@@ -2614,6 +2754,26 @@ final class CompanionManager: ObservableObject {
             }
 
             appendRustRealtimeEvent(type: .responseCompleted)
+            // MARK: - Plato — run the inline-tag fallback BEFORE the turn row is
+            // written so its outcome/decline lands in this turn's telemetry
+            // (it previously ran after endTurn further down this handler).
+            // Fallback: only parse inline [POINT:...] text tags if the model
+            // did NOT already call the point_at_element tool for this turn.
+            // New turns should always use the tool; legacy inline tags are
+            // kept as a safety net in case the model ignores the tool.
+            if !didReceivePointToolCallForCurrentTurn {
+                applyPointDirectiveIfPresent(in: realtimeResponseText)
+            }
+            // MARK: - Plato — flush the turn's pointing rollup into the JSONL
+            // turn row (recordPointingSummary must precede endTurn) and PostHog.
+            // Turns with no locate intent and no pointing activity stay silent.
+            // A still-running async OCR resolution can land after this flush;
+            // its per-event analytics still fire, only this turn's row misses it.
+            if currentTurnPointingMetrics.hasAnySignal {
+                let pointingSummaryRow = currentTurnPointingMetrics.summaryRow()
+                RealtimeTelemetry.shared.recordPointingSummary(pointingSummaryRow)
+                SkillyAnalytics.trackPointTurnSummary(pointingSummaryRow)
+            }
             RealtimeTelemetry.shared.endTurn(usage: usage)
             if !hasEndedAssistantSpeechForCurrentTurn {
                 RealtimeTelemetry.shared.endAssistantSpeech()
@@ -2631,13 +2791,6 @@ final class CompanionManager: ObservableObject {
             }
             currentTurnStartTime = nil
             isAwaitingForcedSpokenFollowUp = false
-            // Fallback: only parse inline [POINT:...] text tags if the model
-            // did NOT already call the point_at_element tool for this turn.
-            // New turns should always use the tool; legacy inline tags are
-            // kept as a safety net in case the model ignores the tool.
-            if !didReceivePointToolCallForCurrentTurn {
-                applyPointDirectiveIfPresent(in: realtimeResponseText)
-            }
             if let currentTurnUserTranscript {
                 // Strip ALL inline [POINT] tags (not just a trailing one) so raw
                 // protocol metadata never lands in the curriculum/session transcripts.
@@ -2675,6 +2828,15 @@ final class CompanionManager: ObservableObject {
             // never orphans function_calls; its async OCR fallback self-owns its close.
             // search_scholar routes to an async network handler. Unknown tools are
             // closed immediately so no function_call is orphaned.
+            // MARK: - Plato — count visual tool calls so "model tried to point"
+            // is separable from "app declined the point" in the turn rollup.
+            let visualToolNames: Set<String> = [
+                "point_at_element", "highlight_region", "ripple_here",
+                "highlight_text", "show_scroll_affordance", "spotlight_region",
+            ]
+            if visualToolNames.contains(name) {
+                currentTurnPointingMetrics.visualToolCallCount += 1
+            }
             switch name {
             case "point_at_element":
                 // MARK: - Plato — the AX phase is synchronous, but an AX miss
@@ -2764,6 +2926,7 @@ final class CompanionManager: ObservableObject {
             didReceiveAnyAudioChunkForCurrentTurn = false
             pendingToolCallIdForCurrentTurn = nil
             isAwaitingForcedSpokenFollowUp = false
+            currentTurnPointingMetrics = PointingTurnMetrics()
             currentTurnStartTime = Date()
             beginRustRealtimeTurnTracking(turnPrefix: "vad")
             clearDetectedElementLocation()

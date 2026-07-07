@@ -127,10 +127,47 @@ enum SkillyAnalytics {
         ])
     }
 
-    static func trackElementPointed(elementLabel: String?) {
+    // MARK: - Plato — Pointing instrumentation (root-cause report 2026-07-07, cause X2).
+    // Replaces the single "element_pointed" event, which fired identically for
+    // an exact AX ring and a cursor-only hedge and never fired on a decline —
+    // so pointing accuracy and the "asked where, only talked" rate were
+    // unmeasurable. Privacy: element labels are UI control names (already the
+    // established policy for element pointing), never transcript text.
+
+    /// A visual was rendered (or hedged). `path` says which source anchored it;
+    /// `offsetFromModelGuessInPoints` is the direct accuracy metric.
+    static func trackPointOutcome(_ outcome: PointOutcome, elementLabel: String?) {
         guard AppSettings.shared.analyticsEnabled else { return }
-        PostHogSDK.shared.capture("element_pointed", properties: [
-            "element_label": elementLabel ?? "unknown"
+        PostHogSDK.shared.capture("point_outcome", properties: [
+            "path": outcome.path.rawValue,
+            "drew_ring": outcome.drewRing,
+            "moved_cursor": outcome.movedCursor,
+            "resolved_frame_area": outcome.resolvedFrameArea as Any,
+            "offset_from_model_guess_pt": outcome.offsetFromModelGuessInPoints as Any,
+            "element_label": elementLabel ?? "unknown",
+        ])
+    }
+
+    /// A visual was silently dropped. `gate` says which guard declined it.
+    static func trackPointDeclined(_ decline: PointDecline, elementLabel: String?) {
+        guard AppSettings.shared.analyticsEnabled else { return }
+        PostHogSDK.shared.capture("point_declined", properties: [
+            "gate": decline.gate.rawValue,
+            "had_model_point": decline.hadModelPoint,
+            "element_label": elementLabel ?? "unknown",
+        ])
+    }
+
+    /// Per-turn rollup — the Symptom-2 rate is where_is_intent turns with
+    /// drew_any_visual == false. Fired only for turns with pointing signal.
+    static func trackPointTurnSummary(_ summaryRow: PointingTurnSummaryRow) {
+        guard AppSettings.shared.analyticsEnabled else { return }
+        PostHogSDK.shared.capture("point_turn_summary", properties: [
+            "where_is_intent": summaryRow.where_is_intent,
+            "visual_tool_call_count": summaryRow.visual_tool_call_count,
+            "drew_any_visual": summaryRow.drew_any_visual,
+            "outcome_count": summaryRow.outcomes.count,
+            "decline_count": summaryRow.declines.count,
         ])
     }
 

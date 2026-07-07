@@ -51,7 +51,12 @@ struct RealtimeUsage: Codable {
     }
 
     static func parse(from json: [String: Any]) -> RealtimeUsage? {
-        guard let raw = json["usage"] as? [String: Any] else { return nil }
+        // MARK: - Plato — In a response.done event the usage object is nested
+        // under "response" ({"type":"response.done","response":{"usage":{...}}}).
+        // Reading only the top-level "usage" key parsed nil on every turn, so
+        // all telemetry turn rows logged null token counts.
+        let nestedResponseUsage = (json["response"] as? [String: Any])?["usage"] as? [String: Any]
+        guard let raw = nestedResponseUsage ?? (json["usage"] as? [String: Any]) else { return nil }
         return RealtimeUsage(
             input_tokens: raw["input_tokens"] as? Int,
             output_tokens: raw["output_tokens"] as? Int,
