@@ -74,6 +74,8 @@ enum PointDeclineGate: String {
     case missingLabel = "missing_label"
     /// The directive named a screen index with no matching capture.
     case wrongScreenIndex = "wrong_screen_index"
+    /// No screenshot exists for this turn at all (capture failed/empty).
+    case noScreenCapture = "no_screen_capture"
     /// Coordinates fell >2% outside the screenshot AND no resolver rescued
     /// the point — declined rather than clamped to a screen edge.
     case outOfBoundsNoResolve = "out_of_bounds_no_resolve"

@@ -20,6 +20,27 @@ struct ParsedPointDirective {
     let oneBasedScreenNumber: Int?
 }
 
+// MARK: - Plato — lenient point_at_element tool arguments (root-cause report
+// cause X1, fix step 2). The label is the ONLY hard requirement: AX name
+// search and OCR are coordinate-free, so a missing/malformed pixel guess must
+// degrade to coordinate-free resolution instead of declining the attempt.
+struct ParsedPointToolArguments: Equatable {
+    let elementLabel: String
+    /// nil unless BOTH coordinates parsed — a lone axis cannot anchor anything.
+    let screenshotXInPixels: Int?
+    let screenshotYInPixels: Int?
+    let oneBasedScreenNumber: Int?
+}
+
+/// Distinguishes the two hard failures so each records its own decline gate.
+enum PointToolArgumentsParseResult: Equatable {
+    case parsed(ParsedPointToolArguments)
+    /// The arguments string was not a JSON object at all.
+    case malformedJSON
+    /// JSON parsed but there is no non-empty label — nothing to resolve by.
+    case missingLabel
+}
+
 enum PointDirectiveParser {
 
     /// Parses the LAST complete [POINT:x,y:label(:screenN)] tag in the response,
@@ -112,6 +133,46 @@ enum PointDirectiveParser {
         return withoutTrailingFragment.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - Plato — lenient parse of point_at_element's arguments JSON.
+    /// Accepts Int or Double for numeric fields (the model emits either). A
+    /// missing/unparseable coordinate pair is discarded — NOT fatal — because
+    /// the AX name search and OCR resolve by label alone.
+    static func parsePointToolArguments(fromJSON argumentsJSON: String) -> PointToolArgumentsParseResult {
+        guard let argumentsData = argumentsJSON.data(using: .utf8),
+              let parsedObject = try? JSONSerialization.jsonObject(with: argumentsData) as? [String: Any] else {
+            return .malformedJSON
+        }
+
+        guard let elementLabel = (parsedObject["label"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !elementLabel.isEmpty else {
+            return .missingLabel
+        }
+
+        func roundedInteger(from value: Any?) -> Int? {
+            if let integerValue = value as? Int { return integerValue }
+            if let doubleValue = value as? Double, doubleValue.isFinite {
+                return Int(doubleValue.rounded())
+            }
+            return nil
+        }
+
+        // Coordinates are kept only as a complete pair — a lone axis is useless.
+        var screenshotXInPixels = roundedInteger(from: parsedObject["x"])
+        var screenshotYInPixels = roundedInteger(from: parsedObject["y"])
+        if screenshotXInPixels == nil || screenshotYInPixels == nil {
+            screenshotXInPixels = nil
+            screenshotYInPixels = nil
+        }
+
+        return .parsed(ParsedPointToolArguments(
+            elementLabel: elementLabel,
+            screenshotXInPixels: screenshotXInPixels,
+            screenshotYInPixels: screenshotYInPixels,
+            oneBasedScreenNumber: roundedInteger(from: parsedObject["screen"])
+        ))
+    }
+
     /// Which turn screenshot a directive's coordinates are relative to.
     /// An EXPLICIT screen number that doesn't match a capture returns nil —
     /// mapping another screen's coordinates onto the cursor screen points at
@@ -121,9 +182,23 @@ enum PointDirectiveParser {
         for parsedPointDirective: ParsedPointDirective,
         in screenCaptures: [CompanionScreenCapture]
     ) -> CompanionScreenCapture? {
+        resolveTargetScreenCapture(
+            oneBasedScreenNumber: parsedPointDirective.oneBasedScreenNumber,
+            in: screenCaptures
+        )
+    }
+
+    // MARK: - Plato — screen-number-only overload (fix step 2): the tool path
+    // resolves captures before it has a full directive, and COORDINATE mapping
+    // must still refuse an explicit-but-wrong screen (nil here) even though the
+    // coordinate-free resolvers go on to scan a fallback screen.
+    static func resolveTargetScreenCapture(
+        oneBasedScreenNumber: Int?,
+        in screenCaptures: [CompanionScreenCapture]
+    ) -> CompanionScreenCapture? {
         guard !screenCaptures.isEmpty else { return nil }
 
-        if let oneBasedScreenNumber = parsedPointDirective.oneBasedScreenNumber {
+        if let oneBasedScreenNumber {
             let zeroBasedScreenIndex = oneBasedScreenNumber - 1
             guard screenCaptures.indices.contains(zeroBasedScreenIndex) else { return nil }
             return screenCaptures[zeroBasedScreenIndex]

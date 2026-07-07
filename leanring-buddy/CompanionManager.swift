@@ -1770,23 +1770,29 @@ final class CompanionManager: ObservableObject {
         /// is sent to the model so it recovers verbally instead of claiming a
         /// highlight it never made.
         case declinedSynchronously(reason: String)
-        /// AX could not confirm the control but the model gave an in-bounds guess;
-        /// run the OCR fallback, which will close the callId when it finishes.
+        /// AX could not confirm the control; run the coordinate-free OCR fallback
+        /// (with the model's in-bounds guess as the hedge anchor, when one exists),
+        /// which will close the callId when it finishes.
         case needsAsyncTextResolution(searchLabel: String, screenCapture: CompanionScreenCapture, modelPoint: CGPoint?)
     }
 
     // MARK: - Plato — honest failure phrasing handed to the model on a point miss,
     // so it describes the location in words instead of claiming a highlight.
     private func honestLocateFailureReason(for label: String) -> String {
-        "could not visually locate '\(label)' on screen; do not claim you highlighted it — describe where it is in words instead"
+        // Neutral + actionable (root-cause report cause C5): the old wording told
+        // the model to "describe it in words instead", which — accumulated as
+        // persistent ok:false conversation items — teaches it to stop attempting
+        // the tool at all.
+        "could not visually pin '\(label)' this turn — do not claim a highlight; tell the user exactly where to find it (name the menu path or a nearby on-screen landmark), and keep using point_at_element for future targets"
     }
 
     // MARK: - Plato — Builds a `function_call_output` JSON string safely (the label
     // inside `reason` may contain quotes/backslashes — never string-interpolate it
     // into a raw JSON literal). Falls back to a bare ok flag if encoding ever fails.
-    private func pointToolOutputJSON(ok: Bool, reason: String? = nil) -> String {
+    private func pointToolOutputJSON(ok: Bool, reason: String? = nil, note: String? = nil) -> String {
         var payload: [String: Any] = ["ok": ok]
         if let reason { payload["reason"] = reason }
+        if let note { payload["note"] = note }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else {
             return ok ? #"{"ok":true}"# : #"{"ok":false}"#
@@ -1800,76 +1806,57 @@ final class CompanionManager: ObservableObject {
     /// This is the preferred path — it keeps coordinates out of the audio
     /// and text streams entirely, so the TTS never voices them.
     private func applyPointDirectiveFromToolCall(argumentsJSON: String) -> PointDirectiveSyncOutcome {
-        guard let argumentsData = argumentsJSON.data(using: .utf8),
-              let parsedArguments = try? JSONSerialization.jsonObject(with: argumentsData) as? [String: Any] else {
+        // MARK: - Plato — lenient parse (fix step 2, cause X1): the label is the
+        // only hard requirement. AX name search and OCR resolve by label alone,
+        // so malformed/missing coordinates degrade to coordinate-free resolution
+        // instead of declining the whole attempt.
+        let toolArguments: ParsedPointToolArguments
+        switch PointDirectiveParser.parsePointToolArguments(fromJSON: argumentsJSON) {
+        case .parsed(let parsedToolArguments):
+            toolArguments = parsedToolArguments
+        case .malformedJSON:
             #if DEBUG
             print("⚠️ point_at_element: could not parse arguments JSON")
             #endif
             recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
-            return .declinedSynchronously(reason: "could not read the pointing request")
-        }
-
-        // Accept integers or doubles for x/y.
-        let screenshotXInPixels: Int
-        let screenshotYInPixels: Int
-        if let integerX = parsedArguments["x"] as? Int {
-            screenshotXInPixels = integerX
-        } else if let doubleX = parsedArguments["x"] as? Double {
-            screenshotXInPixels = Int(doubleX)
-        } else {
-            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
-            return .declinedSynchronously(reason: "could not read the pointing request")
-        }
-        if let integerY = parsedArguments["y"] as? Int {
-            screenshotYInPixels = integerY
-        } else if let doubleY = parsedArguments["y"] as? Double {
-            screenshotYInPixels = Int(doubleY)
-        } else {
-            recordPointDecline(.malformedArguments, hadModelPoint: false, elementLabel: nil)
-            return .declinedSynchronously(reason: "could not read the pointing request")
-        }
-
-        guard let elementLabel = (parsedArguments["label"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !elementLabel.isEmpty else {
+            return .declinedSynchronously(
+                reason: "could not read the pointing request — call point_at_element again with x, y and the control's visible name as label")
+        case .missingLabel:
             recordPointDecline(.missingLabel, hadModelPoint: false, elementLabel: nil)
-            return .declinedSynchronously(reason: "could not read the pointing request")
+            return .declinedSynchronously(
+                reason: "the pointing request had no label — call point_at_element again with the control's visible name as label")
         }
+        let elementLabel = toolArguments.elementLabel
 
-        // Optional 1-based screen index when the model is pointing on a
-        // different display than the one the cursor is currently on.
-        var oneBasedScreenNumber: Int?
-        if let integerScreen = parsedArguments["screen"] as? Int {
-            oneBasedScreenNumber = integerScreen
-        } else if let doubleScreen = parsedArguments["screen"] as? Double {
-            oneBasedScreenNumber = Int(doubleScreen)
-        }
-
-        let parsedPointDirective = ParsedPointDirective(
-            screenshotXInPixels: screenshotXInPixels,
-            screenshotYInPixels: screenshotYInPixels,
-            elementLabel: elementLabel,
-            oneBasedScreenNumber: oneBasedScreenNumber
-        )
-        guard let targetScreenCapture = PointDirectiveParser.resolveTargetScreenCapture(
-            for: parsedPointDirective, in: currentTurnScreenCaptures
-        ) else {
-            recordPointDecline(.wrongScreenIndex, hadModelPoint: false, elementLabel: elementLabel)
-            return .declinedSynchronously(reason: "could not read the pointing request")
-        }
-
-        // Out-of-range (hallucinated) coordinates decline the directive entirely —
-        // but the AX name search below can still rescue the point, because it
-        // never needed the coordinates in the first place.
-        let modelPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
-            screenshotXInPixels: parsedPointDirective.screenshotXInPixels,
-            screenshotYInPixels: parsedPointDirective.screenshotYInPixels,
-            screenCapture: targetScreenCapture
+        // COORDINATE mapping still refuses an explicit-but-wrong screen index
+        // (mapping screen-3 pixels onto the cursor screen would mis-point). But
+        // it no longer hard-declines the attempt: the coordinate-free resolvers
+        // below simply run without a pixel guess (fix step 2, cause X1 — the
+        // wrong-index gate used to fire before AX/OCR ever ran).
+        let coordinateMappingCapture = PointDirectiveParser.resolveTargetScreenCapture(
+            oneBasedScreenNumber: toolArguments.oneBasedScreenNumber,
+            in: currentTurnScreenCaptures
         )
 
-        // MARK: - Plato — prefer the real control frame (by name) over guessed pixels
+        // Model guess in global points — only when the model gave a usable
+        // coordinate pair on a screen that matches its own screen index.
+        // Out-of-range (hallucinated) coordinates map to nil, never clamped.
+        var modelPoint: CGPoint?
+        if let coordinateMappingCapture,
+           let screenshotXInPixels = toolArguments.screenshotXInPixels,
+           let screenshotYInPixels = toolArguments.screenshotYInPixels {
+            modelPoint = mapScreenshotPixelCoordinateToGlobalScreenPoint(
+                screenshotXInPixels: screenshotXInPixels,
+                screenshotYInPixels: screenshotYInPixels,
+                screenCapture: coordinateMappingCapture
+            )
+        }
+
+        // MARK: - Plato — prefer the real control frame (by name) over guessed
+        // pixels. Runs FIRST and needs no screenshot at all — the name walk is
+        // coordinate-free, and the hit-test only engages when a guess exists.
         if let resolvedControl = resolveControlGlobalFrame(
-            label: parsedPointDirective.elementLabel, approximatePoint: modelPoint
+            label: elementLabel, approximatePoint: modelPoint
         ) {
             let controlFrame = resolvedControl.frame
             // Anchor the animation to the screen that actually CONTAINS the
@@ -1879,40 +1866,43 @@ final class CompanionManager: ObservableObject {
             let controlCenter = CGPoint(x: controlFrame.midX, y: controlFrame.midY)
             let hostingScreenFrame = NSScreen.screens
                 .first(where: { $0.frame.contains(controlCenter) })?.frame
-                ?? targetScreenCapture.displayFrame
+                ?? coordinateMappingCapture?.displayFrame
+                ?? NSScreen.main?.frame
+                ?? controlFrame
             detectedElementScreenLocation = controlCenter
             detectedElementDisplayFrame = hostingScreenFrame
-            detectedElementBubbleText = parsedPointDirective.elementLabel
+            detectedElementBubbleText = elementLabel
             addHighlight(PlatoHighlight(
                 kind: .strokedRegion(color: PlatoHighlight.color(forName: "blue"), lineWidth: 2.5),
-                globalFrame: controlFrame, label: parsedPointDirective.elementLabel,
+                globalFrame: controlFrame, label: elementLabel,
                 createdAt: Date(), timeToLive: 4.0))
             recordPointOutcome(PointOutcome(
                 path: resolvedControl.path, drewRing: true, movedCursor: true,
                 resolvedFrameArea: Double(controlFrame.width * controlFrame.height),
                 offsetFromModelGuessInPoints: PointingGeometryMetrics.offsetInPoints(
                     fromModelGuess: modelPoint, toResolvedCenter: controlCenter)
-            ), elementLabel: parsedPointDirective.elementLabel)
+            ), elementLabel: elementLabel)
             return .resolvedSynchronously
         }
 
-        // AX could not resolve the control AND the coordinates were hallucinated:
-        // decline (no pointing) rather than fly to a clamped screen edge. With no
-        // in-bounds guess there is also nothing to anchor an OCR-miss hedge to.
-        guard let modelPoint else {
-            recordPointDecline(.outOfBoundsNoResolve, hadModelPoint: false,
-                               elementLabel: parsedPointDirective.elementLabel)
-            return .declinedSynchronously(
-                reason: honestLocateFailureReason(for: parsedPointDirective.elementLabel))
+        // MARK: - Plato — AX missed. OCR ALWAYS runs before any decline (fix
+        // step 2, cause X1 — it is coordinate-free, so out-of-bounds or missing
+        // coordinates no longer skip it). It scans the screen the model named
+        // when that exists, otherwise the cursor screen. On a hit it rings the
+        // real text frame; on a miss it hedges the cursor to an in-bounds guess
+        // or reports an honest, actionable failure. The async task owns closing
+        // the callId.
+        guard let ocrScreenCapture = coordinateMappingCapture
+                ?? currentTurnScreenCaptures.first(where: { $0.isCursorScreen })
+                ?? currentTurnScreenCaptures.first else {
+            // No screenshots exist this turn at all (capture failed) — the only
+            // remaining resolver already ran (AX), so this is a true dead end.
+            recordPointDecline(.noScreenCapture, hadModelPoint: false, elementLabel: elementLabel)
+            return .declinedSynchronously(reason: honestLocateFailureReason(for: elementLabel))
         }
-
-        // MARK: - Plato — AX missed but the guess is in-bounds. Defer to the OCR
-        // fallback (non-AX surfaces: web/PDF/canvas). It rings the real text frame
-        // on a hit and honestly hedges the cursor on a miss — no confident wrong
-        // ring. The async task owns closing the callId.
         return .needsAsyncTextResolution(
-            searchLabel: parsedPointDirective.elementLabel,
-            screenCapture: targetScreenCapture,
+            searchLabel: elementLabel,
+            screenCapture: ocrScreenCapture,
             modelPoint: modelPoint
         )
     }
@@ -1998,13 +1988,24 @@ final class CompanionManager: ObservableObject {
                     path: .hedgeNoRing, drewRing: false, movedCursor: true,
                     resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
                 ), elementLabel: searchLabel)
+                // The cursor DID move — report a qualified success, not a failure
+                // (root-cause report cause C5: the hedge used to move the cursor
+                // yet return ok:false, contradictory reinforcement that teaches
+                // the model its pointing attempts fail).
+                self.openAIRealtimeClient.sendFunctionCallOutput(
+                    callId: callId,
+                    output: self.pointToolOutputJSON(
+                        ok: true,
+                        note: "the cursor is hovering the approximate area of '\(searchLabel)' — the exact control was not pinned, so also tell the user precisely where to look"
+                    )
+                )
             } else {
                 self.recordPointDecline(.ocrNotFound, hadModelPoint: false, elementLabel: searchLabel)
+                self.openAIRealtimeClient.sendFunctionCallOutput(
+                    callId: callId,
+                    output: self.pointToolOutputJSON(ok: false, reason: self.honestLocateFailureReason(for: searchLabel))
+                )
             }
-            self.openAIRealtimeClient.sendFunctionCallOutput(
-                callId: callId,
-                output: self.pointToolOutputJSON(ok: false, reason: self.honestLocateFailureReason(for: searchLabel))
-            )
         }
     }
 

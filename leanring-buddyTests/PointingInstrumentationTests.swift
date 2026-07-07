@@ -116,6 +116,7 @@ struct PointingInstrumentationTests {
         #expect(PointDeclineGate.malformedArguments.rawValue == "malformed_args")
         #expect(PointDeclineGate.missingLabel.rawValue == "missing_label")
         #expect(PointDeclineGate.wrongScreenIndex.rawValue == "wrong_screen_index")
+        #expect(PointDeclineGate.noScreenCapture.rawValue == "no_screen_capture")
         #expect(PointDeclineGate.outOfBoundsNoResolve.rawValue == "out_of_bounds_no_resolve")
         #expect(PointDeclineGate.ocrAmbiguous.rawValue == "ocr_ambiguous")
         #expect(PointDeclineGate.ocrNotFound.rawValue == "ocr_not_found")
