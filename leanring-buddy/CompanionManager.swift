@@ -930,6 +930,13 @@ final class CompanionManager: ObservableObject {
                 systemPrompt: currentSystemPrompt,
                 voiceName: configuredVoiceName
             )
+            // MARK: - Plato — telemetry must start with the CONNECTION, not with
+            // whichever code path happened to connect. beginSession used to live
+            // only on ensureRealtimeSessionReadyForTurn's cold-connect branch, so
+            // a successful prewarm meant sessionId stayed nil and endTurn silently
+            // discarded every telemetry row (found 2026-07-07: JSONL frozen since
+            // Jun 24 while turns clearly ran).
+            RealtimeTelemetry.shared.beginSession(model: openAIRealtimeClient.currentModel)
             ensureRealtimeEventSubscriptionAndAudioPlayer()
         }
     }
@@ -1931,11 +1938,15 @@ final class CompanionManager: ObservableObject {
             )
 
             // OCR is synchronous + CPU-bound — keep it off the main actor.
+            // Descriptive-label matching: point_at_element labels carry model-
+            // appended role words ("OpenFX panel" for on-screen "OpenFX"), so
+            // the matcher relaxes trailing tokens instead of demanding the
+            // full phrase (highlight_text keeps the exact matcher).
             let matchResult = await Task.detached(priority: .userInitiated) { () -> ScreenshotTextMatcher.MatchResult in
                 let imageForOCR = freshDisplayImage ?? NSBitmapImageRep(data: turnScreenshotJPEGData)?.cgImage
                 guard let imageForOCR else { return .notFound }
                 let recognizedLines = (try? ScreenshotTextRecognizer.recognizeText(in: imageForOCR)) ?? []
-                return ScreenshotTextMatcher.matchResult(for: searchLabel, in: recognizedLines)
+                return ScreenshotTextMatcher.matchResultForDescriptiveLabel(searchLabel, in: recognizedLines)
             }.value
 
             guard generationAtRequest == self.highlightGeneration else {

@@ -114,4 +114,37 @@ enum ScreenshotTextMatcher {
         }
         return nil
     }
+
+    // MARK: - Plato — descriptive-label matching for point_at_element (DaVinci
+    // "OpenFX panel" incident, 2026-07-07). The tool's labels are DESCRIPTIVE:
+    // the model appends words like "panel"/"button"/"icon" that are not
+    // literally on screen, so full-phrase containment misses the exact text
+    // ("OpenFX") sitting right there. Retry with trailing tokens dropped —
+    // the on-screen text is usually the label's PREFIX — bounded so the query
+    // never degenerates. highlight_text keeps the exact matcher: its argument
+    // IS literal on-screen text.
+    /// How many trailing tokens relaxation may drop before giving up.
+    private static let maximumDroppedTrailingTokens = 2
+    /// A relaxed query shorter than this would substring-match wildly.
+    private static let minimumRelaxedQueryLength = 3
+
+    static func matchResultForDescriptiveLabel(_ label: String, in lines: [OCRLine]) -> MatchResult {
+        let normalizedLabel = normalize(label)
+        guard !normalizedLabel.isEmpty else { return .notFound }
+
+        var queryTokens = normalizedLabel.split(separator: " ").map(String.init)
+        let minimumTokenCount = max(1, queryTokens.count - maximumDroppedTrailingTokens)
+
+        while true {
+            let result = matchResult(for: queryTokens.joined(separator: " "), in: lines)
+            // A definitive answer (match OR honest ambiguity) ends the search —
+            // relaxing an already-ambiguous query can only get more ambiguous.
+            if result != .notFound { return result }
+
+            guard queryTokens.count > minimumTokenCount else { return .notFound }
+            queryTokens.removeLast()
+            let relaxedQueryLength = queryTokens.joined(separator: " ").count
+            guard relaxedQueryLength >= minimumRelaxedQueryLength else { return .notFound }
+        }
+    }
 }

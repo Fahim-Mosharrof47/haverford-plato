@@ -83,4 +83,58 @@ struct ScreenshotTextMatcherTests {
         let lines = [line("Conclusion", CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.03))]
         #expect(ScreenshotTextMatcher.matchResult(for: "appendix", in: lines) == .notFound)
     }
+
+    // MARK: - Descriptive-label relaxation (DaVinci "OpenFX panel" incident,
+    // 2026-07-07). point_at_element labels are DESCRIPTIVE — the model appends
+    // words like "panel"/"button" that are not literally on screen — so a
+    // full-phrase miss retries with trailing tokens dropped (longest matching
+    // prefix wins, bounded so the query never degenerates).
+
+    @Test func descriptiveLabelMatchesByDroppingTrailingToken() {
+        let openFXBox = CGRect(x: 0.85, y: 0.95, width: 0.06, height: 0.02)
+        let lines = [
+            line("Color", CGRect(x: 0.1, y: 0.95, width: 0.05, height: 0.02)),
+            line("OpenFX", openFXBox),
+        ]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("OpenFX panel", in: lines)
+                == .match(openFXBox))
+    }
+
+    @Test func descriptiveLabelPrefersTheFullPhraseWhenItExists() {
+        let fullBox = CGRect(x: 0.2, y: 0.5, width: 0.3, height: 0.03)
+        let prefixBox = CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03)
+        let lines = [
+            line("Export", prefixBox),
+            line("Export Settings", fullBox),
+        ]
+        // "Export Settings" contains the full query — no relaxation happens.
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("Export Settings", in: lines)
+                == .match(fullBox))
+    }
+
+    @Test func descriptiveLabelRelaxationStopsAtAmbiguity() {
+        // Relaxing "Methods button" → "Methods" hits two lines: surface the
+        // honest ambiguity instead of guessing.
+        let lines = [
+            line("3. Methods ........ 4", CGRect(x: 0.1, y: 0.8, width: 0.30, height: 0.02)),
+            line("Methods", CGRect(x: 0.1, y: 0.4, width: 0.25, height: 0.04)),
+        ]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("Methods button", in: lines)
+                == .ambiguous(matchCount: 2))
+    }
+
+    @Test func descriptiveLabelRelaxationDropsAtMostTwoTokens() {
+        let lines = [line("Export", CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03))]
+        // Would need to drop 3 tokens to reach "export" — out of bounds.
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel(
+            "export as new file now", in: lines) == .notFound)
+    }
+
+    @Test func descriptiveLabelRelaxationRefusesDegenerateShortQueries() {
+        // Dropping to a sub-3-character query would substring-match wildly
+        // ("x" is in every line containing the letter) — stop instead.
+        let lines = [line("Extras", CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03))]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("x panel", in: lines)
+                == .notFound)
+    }
 }
