@@ -81,7 +81,13 @@ enum CompanionScreenCaptureUtility {
             let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
 
             let configuration = SCStreamConfiguration()
-            let maxDimension = 1280
+            // MARK: - Plato — 1600px cap (was 1280). At 1280 a 3024px-wide Retina
+            // display is downscaled 2.4×, turning small toolbar icons into ~12px
+            // smudges the model cannot see — it then guesses coordinates from
+            // prior knowledge of the app's layout (root-cause C1; DaVinci "FX"
+            // icon repro landed half a screen off). 1600 trades ~1.5-2× vision
+            // tokens for legible icons.
+            let maxDimension = 1600
             let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
             if display.width >= display.height {
                 configuration.width = maxDimension
@@ -117,8 +123,12 @@ enum CompanionScreenCaptureUtility {
                 displayWidthInPoints: Int(displayFrame.width),
                 displayHeightInPoints: Int(displayFrame.height),
                 displayFrame: displayFrame,
-                screenshotWidthInPixels: configuration.width,
-                screenshotHeightInPixels: configuration.height
+                // MARK: - Plato — declared px MUST equal actual px. These values
+                // are what the model is told to answer in AND what the mapping
+                // divides by; ScreenCaptureKit may round the requested size, and
+                // any requested-vs-actual mismatch becomes a systematic offset.
+                screenshotWidthInPixels: cgImage.width,
+                screenshotHeightInPixels: cgImage.height
             ))
         }
 
@@ -175,6 +185,75 @@ enum CompanionScreenCaptureUtility {
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
+        )
+    }
+
+    // MARK: - Plato — native-resolution crop for point re-localization (step 3c)
+
+    /// A native-resolution close-up of one region of a display, plus the exact
+    /// global AppKit rect it covers — so a pixel the model picks INSIDE the crop
+    /// maps back to a precise global point.
+    struct CompanionCropCapture {
+        let imageData: Data
+        /// Global AppKit rect (bottom-left origin) the crop image covers.
+        let cropGlobalRect: CGRect
+        let cropPixelWidth: Int
+        let cropPixelHeight: Int
+    }
+
+    /// Captures a square region (side `cropSideInPoints`, clamped to the display)
+    /// centered on `globalPoint`, at native Retina resolution. Icons that are
+    /// ~12px smudges in the per-turn screenshot are full-size here, so the model
+    /// can re-localize what it could not see the first time.
+    static func captureNativeResolutionCrop(
+        aroundGlobalPoint globalPoint: CGPoint,
+        displayFrame: CGRect,
+        cropSideInPoints: CGFloat
+    ) async throws -> CompanionCropCapture {
+        let displayImage = try await captureDisplayImageForOCR(displayFrame: displayFrame)
+
+        // Points → image pixels. The capture spans exactly displayFrame, so the
+        // scale is actual-image-width / display-width (never assume 2.0 Retina).
+        let pixelsPerPoint = CGFloat(displayImage.width) / max(displayFrame.width, 1)
+        let cropSideInPixels = cropSideInPoints * pixelsPerPoint
+
+        // Desired crop center in the image's TOP-LEFT-origin pixel space.
+        let centerXInPixels = (globalPoint.x - displayFrame.minX) * pixelsPerPoint
+        let centerYInPixels = (displayFrame.maxY - globalPoint.y) * pixelsPerPoint
+
+        // Clamp the crop rect inside the image (shifting it rather than
+        // shrinking it near edges, so the target stays comfortably inside).
+        let maxOriginX = max(0, CGFloat(displayImage.width) - cropSideInPixels)
+        let maxOriginY = max(0, CGFloat(displayImage.height) - cropSideInPixels)
+        let cropPixelRect = CGRect(
+            x: min(max(0, centerXInPixels - cropSideInPixels / 2), maxOriginX),
+            y: min(max(0, centerYInPixels - cropSideInPixels / 2), maxOriginY),
+            width: min(cropSideInPixels, CGFloat(displayImage.width)),
+            height: min(cropSideInPixels, CGFloat(displayImage.height))
+        ).integral
+
+        guard let croppedImage = displayImage.cropping(to: cropPixelRect),
+              let jpegData = NSBitmapImageRep(cgImage: croppedImage)
+                .representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+            throw NSError(domain: "CompanionScreenCapture", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to crop display image"])
+        }
+
+        // Back-map the ACTUAL cropped pixel rect (post-clamp, post-integral,
+        // post-cropping) to the global AppKit rect it covers. Use the cropped
+        // image's real dimensions so declared px == actual px.
+        let cropGlobalRect = CGRect(
+            x: displayFrame.minX + cropPixelRect.minX / pixelsPerPoint,
+            y: displayFrame.maxY - (cropPixelRect.minY + cropPixelRect.height) / pixelsPerPoint,
+            width: CGFloat(croppedImage.width) / pixelsPerPoint,
+            height: CGFloat(croppedImage.height) / pixelsPerPoint
+        )
+
+        return CompanionCropCapture(
+            imageData: jpegData,
+            cropGlobalRect: cropGlobalRect,
+            cropPixelWidth: croppedImage.width,
+            cropPixelHeight: croppedImage.height
         )
     }
 }

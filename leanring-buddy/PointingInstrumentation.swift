@@ -37,6 +37,9 @@ enum PointAnchorPath: String {
     case axHitTest = "ax_hittest"
     /// Vision OCR matched the target text and returned its real frame.
     case ocrMatch = "ocr_match"
+    /// The model re-localized the target inside a native-resolution close-up
+    /// crop (second round-trip after AX and OCR both missed).
+    case cropRefined = "crop_refined"
     /// Legacy inline [POINT:x,y] tag — raw model pixel guess, cursor only.
     case rawInline = "raw_inline"
     /// Model-supplied bounding box drawn verbatim (highlight_region/spotlight).

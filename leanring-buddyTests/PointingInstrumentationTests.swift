@@ -109,6 +109,7 @@ struct PointingInstrumentationTests {
         #expect(PointAnchorPath.axName.rawValue == "ax_name")
         #expect(PointAnchorPath.axHitTest.rawValue == "ax_hittest")
         #expect(PointAnchorPath.ocrMatch.rawValue == "ocr_match")
+        #expect(PointAnchorPath.cropRefined.rawValue == "crop_refined")
         #expect(PointAnchorPath.rawInline.rawValue == "raw_inline")
         #expect(PointAnchorPath.rawRegion.rawValue == "raw_region")
         #expect(PointAnchorPath.rawPoint.rawValue == "raw_point")

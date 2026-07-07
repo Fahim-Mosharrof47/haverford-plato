@@ -226,6 +226,22 @@ final class CompanionManager: ObservableObject {
     // gate records that it fired; the rollup lands in the telemetry turn row
     // and PostHog at response.done. Reset with the other per-turn state.
     private var currentTurnPointingMetrics = PointingTurnMetrics()
+    // MARK: - Plato — In-flight crop re-localization (fix step 3c). Set when AX
+    // and OCR both missed and a native-res close-up was sent to the model; the
+    // point_in_crop handler consumes it. If the follow-up response ends without
+    // a point_in_crop call, responseDone falls back to the hedge at the original
+    // guess so the user still sees SOMETHING. Reset on every new turn.
+    private var pendingCropRefinement: (
+        searchLabel: String,
+        cropCapture: CompanionScreenCaptureUtility.CompanionCropCapture,
+        originalModelPoint: CGPoint,
+        displayFrame: CGRect,
+        generation: Int
+    )?
+    /// Claimed SYNCHRONOUSLY before the crop-capture await (MainActor code is
+    /// reentrant across suspensions, so checking pendingCropRefinement alone is
+    /// a TOCTOU). Cleared wherever pendingCropRefinement is consumed or reset.
+    private var isCropRefinementInFlight = false
     // MARK: - Plato — Set while a focus block is being started by a voice command, so the
     // onWorkStart announcement is suppressed (the tool continuation speaks the confirmation).
     private var isVoiceInitiatedPomodoroStart = false
@@ -1178,7 +1194,7 @@ final class CompanionManager: ObservableObject {
 
     to point at a control, call the `point_at_element` tool IN ADDITION to your spoken response. you emit both the spoken message AND the tool call as part of the same response. the tool takes:
     - x, y — integer pixel coordinates in the screenshot's coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward. the screenshot images are labeled with their pixel dimensions — use those dimensions as the coordinate space.
-    - label — a short 1-3 word name of the element, like "frame tool" or "save button". give the exact on-screen name — plato uses it to find and ring the real control.
+    - label — a short 1-3 word name of the element, like "frame tool" or "save button". give the EXACT text visible on or beside the control — plato uses it to find and ring the real control. for icon-only buttons, give the short text on the glyph if any ("FX", "+") or the control's tooltip name; never invent a descriptive phrase that isn't on screen.
     - screen — optional 1-based screen number when there are multiple screenshots. omit if the element is on the cursor's screen. include it if the element is on a DIFFERENT screen (use the screen number from the image label). this is important — without the screen number, the cursor will point at the wrong place.
 
     never say "point", never read coordinates out loud, never mention any tool name, and never describe the tool call in your spoken response. tool calls are silent metadata — just speak naturally about what the user should do, and call the tools in parallel.
@@ -1986,23 +2002,67 @@ final class CompanionManager: ObservableObject {
                 return
             }
 
-            // OCR miss: honest degrade — move the cursor to the in-bounds guess
-            // with a hedged bubble and NO ring, or decline entirely if no guess.
-            // (If response.done already flushed this turn's rollup, these records
-            // still fire as individual PostHog events — only the JSONL row for
-            // this turn misses them.)
+            // OCR miss with an in-bounds guess: before hedging on the coarse
+            // guess, send a native-resolution close-up around it and ask the
+            // model to re-localize in the crop's own pixel grid (fix step 3c —
+            // icons that are ~12px smudges in the turn screenshot are full-size
+            // in the crop). The point_in_crop handler consumes the pending
+            // state; responseDone falls back to the hedge if the model never
+            // calls it. No guess at all → honest decline.
             if let modelPoint {
-                self.detectedElementScreenLocation = modelPoint
-                self.detectedElementDisplayFrame = displayFrame
-                self.detectedElementBubbleText = "around here — \(searchLabel)"
-                self.recordPointOutcome(PointOutcome(
-                    path: .hedgeNoRing, drewRing: false, movedCursor: true,
-                    resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
-                ), elementLabel: searchLabel)
-                // The cursor DID move — report a qualified success, not a failure
-                // (root-cause report cause C5: the hedge used to move the cursor
-                // yet return ok:false, contradictory reinforcement that teaches
-                // the model its pointing attempts fail).
+                // MARK: - Plato — single-flight guard (fix step 3c): only one crop
+                // re-localization may be pending per turn, or a later point_in_crop
+                // would map against the WRONG crop's global rect. The slot is
+                // CLAIMED SYNCHRONOUSLY before the capture await — MainActor code
+                // is reentrant across suspensions, so two same-turn OCR tasks can
+                // both pass a pendingCropRefinement==nil check before either
+                // assigns it. A second miss falls through to the hedge instead.
+                if !self.isCropRefinementInFlight {
+                    self.isCropRefinementInFlight = true
+                    let cropCapture = try? await CompanionScreenCaptureUtility.captureNativeResolutionCrop(
+                        aroundGlobalPoint: modelPoint, displayFrame: displayFrame,
+                        cropSideInPoints: Self.cropRefinementSideInPoints)
+
+                    // Re-check staleness AFTER the await: the screen/turn may have
+                    // changed while capturing. Painting the stale guess (or hedging
+                    // on it) would be exactly the stale-paint the generation
+                    // stamping exists to prevent — decline like the sibling paths.
+                    guard generationAtRequest == self.highlightGeneration else {
+                        self.isCropRefinementInFlight = false
+                        self.recordPointDecline(.screenChangedMidResolve,
+                                                hadModelPoint: true, elementLabel: searchLabel)
+                        self.openAIRealtimeClient.sendFunctionCallOutput(
+                            callId: callId,
+                            output: #"{"ok":false,"reason":"the screen changed before pointing"}"#
+                        )
+                        return
+                    }
+
+                    if let cropCapture {
+                        self.pendingCropRefinement = (
+                            searchLabel: searchLabel, cropCapture: cropCapture,
+                            originalModelPoint: modelPoint, displayFrame: displayFrame,
+                            generation: generationAtRequest
+                        )
+                        self.openAIRealtimeClient.sendCropRefinementRequest(
+                            cropJPEGData: cropCapture.imageData,
+                            describedAs: "full-resolution close-up around the area of '\(searchLabel)'. this image is \(cropCapture.cropPixelWidth) pixels wide by \(cropCapture.cropPixelHeight) pixels tall, top-left origin. find '\(searchLabel)' in THIS image and call point_in_crop with its x,y in THIS grid. if it is not visible here, do not call point_in_crop — answer in words.",
+                            callId: callId,
+                            output: self.pointToolOutputJSON(
+                                ok: false,
+                                reason: "not pinned yet — a full-resolution close-up follows; call point_in_crop with x,y in the crop's pixel grid to pin '\(searchLabel)', or answer in words if it is not in the crop"
+                            )
+                        )
+                        return
+                    }
+                    // Capture genuinely failed — release the slot and hedge below.
+                    self.isCropRefinementInFlight = false
+                }
+                // Hedge: second same-turn miss, or crop capture failure. The
+                // cursor DID move, so report a qualified success, not a failure
+                // (cause C5: contradictory ok:false reinforcement).
+                self.applyHedgedCursorFallback(searchLabel: searchLabel,
+                                               modelPoint: modelPoint, displayFrame: displayFrame)
                 self.openAIRealtimeClient.sendFunctionCallOutput(
                     callId: callId,
                     output: self.pointToolOutputJSON(
@@ -2018,6 +2078,89 @@ final class CompanionManager: ObservableObject {
                 )
             }
         }
+    }
+
+    // MARK: - Plato — crop re-localization (fix step 3c)
+
+    /// Side length in points of the native-resolution close-up sent for
+    /// re-localization. Large enough to survive a coarse first guess being a
+    /// few hundred points off, small enough that icons render at full size.
+    private static let cropRefinementSideInPoints: CGFloat = 480
+
+    /// Cursor-only honest degrade shared by the OCR-miss hedge, the failed
+    /// refinement path, and the never-called-point_in_crop safety net.
+    private func applyHedgedCursorFallback(searchLabel: String, modelPoint: CGPoint, displayFrame: CGRect) {
+        detectedElementScreenLocation = modelPoint
+        detectedElementDisplayFrame = displayFrame
+        detectedElementBubbleText = "around here — \(searchLabel)"
+        recordPointOutcome(PointOutcome(
+            path: .hedgeNoRing, drewRing: false, movedCursor: true,
+            resolvedFrameArea: nil, offsetFromModelGuessInPoints: nil
+        ), elementLabel: searchLabel)
+    }
+
+    /// Handles a point_in_crop tool call: maps the model's crop-grid pixel to a
+    /// global point via the crop's exact global rect and pulses/moves there.
+    /// Falls back to the original-guess hedge when the refinement is unusable.
+    private func applyCropRefinementFromToolCall(argumentsJSON: String, callId: String) {
+        guard let pendingRefinement = pendingCropRefinement else {
+            openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: pointToolOutputJSON(ok: false, reason: "no close-up is awaiting refinement"))
+            return
+        }
+        pendingCropRefinement = nil
+        isCropRefinementInFlight = false
+
+        guard pendingRefinement.generation == highlightGeneration else {
+            recordPointDecline(.screenChangedMidResolve, hadModelPoint: true,
+                               elementLabel: pendingRefinement.searchLabel)
+            openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: pointToolOutputJSON(ok: false, reason: "the screen changed before pointing"))
+            return
+        }
+
+        // globalPointFromScreenshotPixel is grid-agnostic: the crop's pixel
+        // grid maps onto the crop's global rect exactly as a full screenshot
+        // maps onto its display (same top-left origin, same 2% tolerance).
+        guard let arguments = decodeToolArguments(argumentsJSON),
+              let cropXInPixels = integerValue(from: arguments["x"]),
+              let cropYInPixels = integerValue(from: arguments["y"]),
+              let refinedGlobalPoint = HighlightGeometry.globalPointFromScreenshotPixel(
+                  x: cropXInPixels, y: cropYInPixels,
+                  screenshotWidthInPixels: pendingRefinement.cropCapture.cropPixelWidth,
+                  screenshotHeightInPixels: pendingRefinement.cropCapture.cropPixelHeight,
+                  displayFrame: pendingRefinement.cropCapture.cropGlobalRect
+              ) else {
+            // Unusable refinement — degrade to the hedge at the original guess
+            // so the user still sees something.
+            applyHedgedCursorFallback(searchLabel: pendingRefinement.searchLabel,
+                                      modelPoint: pendingRefinement.originalModelPoint,
+                                      displayFrame: pendingRefinement.displayFrame)
+            openAIRealtimeClient.sendFunctionCallOutput(
+                callId: callId,
+                output: pointToolOutputJSON(
+                    ok: true,
+                    note: "the cursor is hovering the approximate area of '\(pendingRefinement.searchLabel)' — also tell the user precisely where to look"))
+            return
+        }
+
+        detectedElementScreenLocation = refinedGlobalPoint
+        detectedElementDisplayFrame = pendingRefinement.displayFrame
+        detectedElementBubbleText = pendingRefinement.searchLabel
+        addHighlight(PlatoHighlight(
+            kind: .ripplePulse(color: PlatoHighlight.color(forName: "blue")),
+            globalFrame: CGRect(x: refinedGlobalPoint.x, y: refinedGlobalPoint.y, width: 0, height: 0),
+            label: pendingRefinement.searchLabel, createdAt: Date(), timeToLive: 4.0))
+        recordPointOutcome(PointOutcome(
+            path: .cropRefined, drewRing: true, movedCursor: true,
+            resolvedFrameArea: nil,
+            offsetFromModelGuessInPoints: PointingGeometryMetrics.offsetInPoints(
+                fromModelGuess: pendingRefinement.originalModelPoint,
+                toResolvedCenter: refinedGlobalPoint)
+        ), elementLabel: pendingRefinement.searchLabel)
+        openAIRealtimeClient.sendFunctionCallOutput(callId: callId, output: pointToolOutputJSON(ok: true))
     }
 
     // MARK: - Plato — resolve the REAL control frame, preferring an AX label match
@@ -2462,6 +2605,9 @@ final class CompanionManager: ObservableObject {
         isAwaitingForcedSpokenFollowUp = false
         isWaitingForRealtimeAudioQueueDrain = false
         currentTurnPointingMetrics = PointingTurnMetrics()
+        // MARK: - Plato — clear any in-flight crop re-localization from the prior turn.
+        pendingCropRefinement = nil
+        isCropRefinementInFlight = false
         // MARK: - Plato — drop last turn's highlights before a new turn
         clearAllHighlights()
         // MARK: - Skilly — Record turn start for usage tracking (key press → response.done)
@@ -2776,6 +2922,29 @@ final class CompanionManager: ObservableObject {
             if !didReceivePointToolCallForCurrentTurn {
                 applyPointDirectiveIfPresent(in: realtimeResponseText)
             }
+            // MARK: - Plato — crop re-localization safety net (fix step 3c): if a
+            // native-res close-up was sent this turn but the model's follow-up
+            // response ended WITHOUT calling point_in_crop, fall back to the hedge
+            // at the original coarse guess so the user still sees SOMETHING rather
+            // than an unpinned target silently dropped. Skipped while a forced
+            // spoken follow-up is completing: that response (#2) predates the crop
+            // continuation (#3), so consuming the pending state here would throw
+            // away the point_in_crop pin that response #3 is about to deliver.
+            if !isAwaitingForcedSpokenFollowUp, let pendingRefinement = pendingCropRefinement {
+                pendingCropRefinement = nil
+                isCropRefinementInFlight = false
+                if pendingRefinement.generation == highlightGeneration {
+                    applyHedgedCursorFallback(searchLabel: pendingRefinement.searchLabel,
+                                              modelPoint: pendingRefinement.originalModelPoint,
+                                              displayFrame: pendingRefinement.displayFrame)
+                } else {
+                    // The screen/turn changed while the crop was outstanding —
+                    // never paint stale, but still record the drop so the turn
+                    // rollup keeps its every-attempt-accounted guarantee.
+                    recordPointDecline(.screenChangedMidResolve, hadModelPoint: true,
+                                       elementLabel: pendingRefinement.searchLabel)
+                }
+            }
             // MARK: - Plato — flush the turn's pointing rollup into the JSONL
             // turn row (recordPointingSummary must precede endTurn) and PostHog.
             // Turns with no locate intent and no pointing activity stay silent.
@@ -2843,7 +3012,7 @@ final class CompanionManager: ObservableObject {
             // MARK: - Plato — count visual tool calls so "model tried to point"
             // is separable from "app declined the point" in the turn rollup.
             let visualToolNames: Set<String> = [
-                "point_at_element", "highlight_region", "ripple_here",
+                "point_at_element", "point_in_crop", "highlight_region", "ripple_here",
                 "highlight_text", "show_scroll_affordance", "spotlight_region",
             ]
             if visualToolNames.contains(name) {
@@ -2879,6 +3048,12 @@ final class CompanionManager: ObservableObject {
                         modelPoint: modelPoint, callId: callId
                     )
                 }
+            case "point_in_crop":
+                // MARK: - Plato — crop re-localization follow-up (fix step 3c): the
+                // model re-localized the target in the native-res close-up we sent
+                // after AX+OCR both missed. Map its crop-grid pixel back to global.
+                didReceivePointToolCallForCurrentTurn = true
+                applyCropRefinementFromToolCall(argumentsJSON: argumentsJSON, callId: callId)
             case "search_scholar":
                 handleScholarToolCall(argumentsJSON: argumentsJSON, callId: callId)
             case "control_pomodoro":
@@ -2939,6 +3114,9 @@ final class CompanionManager: ObservableObject {
             pendingToolCallIdForCurrentTurn = nil
             isAwaitingForcedSpokenFollowUp = false
             currentTurnPointingMetrics = PointingTurnMetrics()
+            // MARK: - Plato — clear any in-flight crop re-localization from the prior turn.
+            pendingCropRefinement = nil
+            isCropRefinementInFlight = false
             currentTurnStartTime = Date()
             beginRustRealtimeTurnTracking(turnPrefix: "vad")
             clearDetectedElementLocation()

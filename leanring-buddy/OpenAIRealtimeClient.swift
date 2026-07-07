@@ -388,7 +388,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                     ],
                     "label": [
                         "type": "string",
-                        "description": "Short 1-3 word name of the element you are pointing at, for example 'Frame tool' or 'Save button'."
+                        "description": "Short 1-3 word name of the element you are pointing at. Use the EXACT text visible on or beside the control ('Export', 'Auto Save'), because Plato locates the real control by this text. For icon-only buttons, give the short text ON the glyph if any ('FX', '+') or the control's tooltip name — never invent a descriptive phrase that is not on screen."
                     ],
                     "screen": [
                         "type": "integer",
@@ -396,6 +396,31 @@ final class OpenAIRealtimeClient: ObservableObject {
                     ]
                 ],
                 "required": ["x", "y", "label"]
+            ]
+        ]
+
+        // MARK: - Plato — point_in_crop tool (precision re-localization, root-cause
+        // fix step 3c). When AX and OCR both miss, Plato sends a native-resolution
+        // close-up crop around the model's coarse guess and asks it to re-localize
+        // in the crop's own pixel grid — converting one coarse global guess into a
+        // fine local one. Only meaningful right after that crop follow-up.
+        let pointInCropTool: [String: Any] = [
+            "type": "function",
+            "name": "point_in_crop",
+            "description": "Pin a target inside a close-up crop image. ONLY call this immediately after a tool result told you a close-up crop follows and asked you to pin the target in it. Give x,y in THAT crop image's own pixel grid (origin top-left). If the target is not visible in the crop, do not call this — answer in words instead. Never mention this tool or coordinates in speech.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "x": [
+                        "type": "integer",
+                        "description": "X pixel coordinate in the crop image; origin (0,0) is the crop's top-left corner."
+                    ],
+                    "y": [
+                        "type": "integer",
+                        "description": "Y pixel coordinate in the crop image; origin (0,0) is the crop's top-left corner."
+                    ]
+                ],
+                "required": ["x", "y"]
             ]
         ]
 
@@ -593,7 +618,7 @@ final class OpenAIRealtimeClient: ObservableObject {
                 "input": audioInput,
                 "output": audioOutput,
             ],
-            "tools": [pointAtElementTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool, highlightTextTool, showScrollAffordanceTool, spotlightRegionTool],
+            "tools": [pointAtElementTool, pointInCropTool, searchScholarTool, controlPomodoroTool, highlightRegionTool, rippleHereTool, highlightTextTool, showScrollAffordanceTool, spotlightRegionTool],
             "tool_choice": "auto",
         ]
 
@@ -814,6 +839,57 @@ final class OpenAIRealtimeClient: ObservableObject {
             try? await sendEvent(responseEvent)
             #if DEBUG
             print("🔎 OpenAI Realtime: sent research tool result + continuation for \(callId)")
+            #endif
+        }
+    }
+
+    // MARK: - Plato — crop re-localization continuation (fix step 3c)
+
+    /// Send, IN ORDER: the close-up crop image, the original tool call's
+    /// output, then a response.create — so the model sees the crop before it
+    /// is asked to act on it. sendScreenshot + sendToolResultAndContinue each
+    /// run their own detached Task, so calling them back-to-back would race
+    /// the image item against the response request; this method sequences all
+    /// three events in one Task.
+    func sendCropRefinementRequest(cropJPEGData: Data, describedAs cropDescription: String,
+                                   callId: String, output: String) {
+        guard isConnected else { return }
+
+        let dataURL = "data:image/jpeg;base64,\(cropJPEGData.base64EncodedString())"
+        let cropImageEvent: [String: Any] = [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": [
+                    ["type": "input_text", "text": cropDescription],
+                    ["type": "input_image", "image_url": dataURL],
+                ],
+            ],
+        ]
+        let outputEvent: [String: Any] = [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "function_call_output",
+                "call_id": callId,
+                "output": output,
+            ],
+        ]
+        // GA Realtime shape (see commitAudioAndRespond): use output_modalities.
+        let responseEvent: [String: Any] = [
+            "type": "response.create",
+            "response": [
+                "output_modalities": ["audio"],
+                "tool_choice": "auto",
+            ],
+        ]
+
+        Task {
+            try? await sendEvent(cropImageEvent)
+            try? await sendEvent(outputEvent)
+            try? await sendEvent(responseEvent)
+            #if DEBUG
+            print("🔍 OpenAI Realtime: sent crop refinement request for \(callId)")
             #endif
         }
     }

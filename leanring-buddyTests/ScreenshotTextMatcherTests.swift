@@ -131,10 +131,94 @@ struct ScreenshotTextMatcherTests {
     }
 
     @Test func descriptiveLabelRelaxationRefusesDegenerateShortQueries() {
-        // Dropping to a sub-3-character query would substring-match wildly
-        // ("x" is in every line containing the letter) — stop instead.
+        // A sub-3-character relaxed query may only match on WORD boundaries —
+        // never by substring ("x" is inside every line containing the letter).
         let lines = [line("Extras", CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03))]
         #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("x panel", in: lines)
                 == .notFound)
+    }
+
+    // MARK: - Word-boundary matching (root-cause report C7 + icon-glyph
+    // buttons like DaVinci's "FX"). When Vision word boxes are available, a
+    // match rings the exact WORD(s), not the whole recognized line, and short
+    // glyph text ("FX") is matchable safely because word-boundary equality
+    // cannot land inside an unrelated word.
+
+    private func wordedLine(_ text: String, _ box: CGRect, _ words: [(String, CGRect)]) -> OCRLine {
+        OCRLine(text: text, boundingBox: box,
+                words: words.map { OCRWord(text: $0.0, boundingBox: $0.1) })
+    }
+
+    @Test func wordLevelMatchRingsTheWordNotTheLine() {
+        let exportWordBox = CGRect(x: 0.40, y: 0.9, width: 0.06, height: 0.02)
+        let lines = [wordedLine("File Export Share", CGRect(x: 0.1, y: 0.9, width: 0.5, height: 0.02), [
+            ("File", CGRect(x: 0.10, y: 0.9, width: 0.05, height: 0.02)),
+            ("Export", exportWordBox),
+            ("Share", CGRect(x: 0.55, y: 0.9, width: 0.05, height: 0.02)),
+        ])]
+        #expect(ScreenshotTextMatcher.matchResult(for: "Export", in: lines) == .match(exportWordBox))
+    }
+
+    @Test func consecutiveWordSequenceUnionsOnlyThoseWordBoxes() {
+        let effectsBox = CGRect(x: 0.10, y: 0.9, width: 0.07, height: 0.02)
+        let libraryBox = CGRect(x: 0.18, y: 0.9, width: 0.07, height: 0.02)
+        let lines = [wordedLine("Effects Library Edit Index", CGRect(x: 0.1, y: 0.9, width: 0.4, height: 0.02), [
+            ("Effects", effectsBox), ("Library", libraryBox),
+            ("Edit", CGRect(x: 0.26, y: 0.9, width: 0.05, height: 0.02)),
+            ("Index", CGRect(x: 0.32, y: 0.9, width: 0.05, height: 0.02)),
+        ])]
+        #expect(ScreenshotTextMatcher.matchResult(for: "Effects Library", in: lines)
+                == .match(effectsBox.union(libraryBox)))
+    }
+
+    @Test func shortGlyphLabelResolvesViaWordBoundaryMatch() {
+        // The DaVinci case: an icon-only button whose glyph OCRs as the word
+        // "FX". The model's descriptive label "FX icon" relaxes to "fx" —
+        // allowed because word-boundary equality is safe at any length.
+        let fxBox = CGRect(x: 0.85, y: 0.95, width: 0.03, height: 0.02)
+        let lines = [wordedLine("Color FX Fusion", CGRect(x: 0.7, y: 0.95, width: 0.25, height: 0.02), [
+            ("Color", CGRect(x: 0.70, y: 0.95, width: 0.06, height: 0.02)),
+            ("FX", fxBox),
+            ("Fusion", CGRect(x: 0.90, y: 0.95, width: 0.06, height: 0.02)),
+        ])]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("FX icon", in: lines)
+                == .match(fxBox))
+    }
+
+    @Test func shortQueriesNeverMatchInsideOtherWords() {
+        // "ex" is a substring of "Export" but not a word — must not match.
+        let lines = [wordedLine("Export", CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03), [
+            ("Export", CGRect(x: 0.2, y: 0.8, width: 0.2, height: 0.03)),
+        ])]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("ex panel", in: lines)
+                == .notFound)
+    }
+
+    @Test func repeatedWordWithinOneLineCollapsesToOneMatch() {
+        // Pre-word-pass behavior: a single word repeating inside ONE line still
+        // highlighted that line. Keep that contract — same-line repeats collapse
+        // to one union match; only cross-line repeats are genuinely ambiguous.
+        let firstTheBox = CGRect(x: 0.10, y: 0.5, width: 0.03, height: 0.02)
+        let secondTheBox = CGRect(x: 0.30, y: 0.5, width: 0.03, height: 0.02)
+        let lines = [wordedLine("the cat and the dog", CGRect(x: 0.1, y: 0.5, width: 0.4, height: 0.02), [
+            ("the", firstTheBox),
+            ("cat", CGRect(x: 0.14, y: 0.5, width: 0.04, height: 0.02)),
+            ("and", CGRect(x: 0.20, y: 0.5, width: 0.04, height: 0.02)),
+            ("the", secondTheBox),
+            ("dog", CGRect(x: 0.35, y: 0.5, width: 0.04, height: 0.02)),
+        ])]
+        #expect(ScreenshotTextMatcher.matchResult(for: "the", in: lines)
+                == .match(firstTheBox.union(secondTheBox)))
+    }
+
+    @Test func duplicateShortGlyphWordsAreAmbiguous() {
+        let lines = [
+            wordedLine("FX", CGRect(x: 0.2, y: 0.9, width: 0.03, height: 0.02),
+                       [("FX", CGRect(x: 0.2, y: 0.9, width: 0.03, height: 0.02))]),
+            wordedLine("FX", CGRect(x: 0.6, y: 0.5, width: 0.03, height: 0.02),
+                       [("FX", CGRect(x: 0.6, y: 0.5, width: 0.03, height: 0.02))]),
+        ]
+        #expect(ScreenshotTextMatcher.matchResultForDescriptiveLabel("FX icon", in: lines)
+                == .ambiguous(matchCount: 2))
     }
 }
